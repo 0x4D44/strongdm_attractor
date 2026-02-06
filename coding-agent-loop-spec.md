@@ -1,7 +1,5 @@
 # Coding Agent Loop Specification
 
-Version: 1.0
-
 This document is a language-agnostic specification for building a coding agent -- an autonomous system that pairs a large language model with developer tools through an agentic loop. It is designed to be implementable from scratch by any developer or coding agent in any programming language.
 
 This spec layers on top of the [Unified LLM Client Specification](./unified-llm-spec.md), which handles all LLM communication. The agent loop uses the SDK's low-level `Client.complete()` and `Client.stream()` methods directly, implementing its own turn loop to interleave tool execution with truncation, steering, events, and loop detection.

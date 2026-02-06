@@ -2,8 +2,6 @@
 
 A DOT-based pipeline runner that uses directed graphs (defined in Graphviz DOT syntax) to orchestrate multi-stage AI workflows. Each node in the graph is an AI task (LLM call, human review, conditional branch, parallel fan-out, etc.) and edges define the flow between them.
 
-**Version:** 1.0
-
 ---
 
 ## Table of Contents
