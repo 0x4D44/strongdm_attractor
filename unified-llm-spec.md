@@ -1470,7 +1470,7 @@ FUNCTION rate_limit_middleware(request, next):
 
 This section provides detailed guidance for implementing a provider adapter. It is intended as a reference for anyone adding support for a new provider.
 
-### 7.1Interface Summary
+### 7.1 Interface Summary
 
 Each adapter must implement:
 
@@ -1490,7 +1490,7 @@ Recommended optional methods:
     FUNCTION supports_tool_choice(mode: String) -> Boolean
 ```
 
-### 7.2Request Translation
+### 7.2 Request Translation
 
 The adapter must translate a unified `Request` into the provider's native API format. The general steps are:
 
@@ -1595,7 +1595,7 @@ Special behaviors:
 | Tool.parameters         | tools[].function.parameters                        | tools[].input_schema                             | tools[].functionDeclarations[].parameters          |
 | Wrapper structure       | `{"type":"function","function":{...}}`             | `{"name":...,"description":...,"input_schema":...}` | `{"functionDeclarations":[{...}]}`             |
 
-### 7.5Response Translation
+### 7.5 Response Translation
 
 The adapter must parse the provider's response into the unified Response format:
 
@@ -1635,7 +1635,7 @@ FUNCTION raise_error(http_response):
     )
 ```
 
-### 7.7Streaming Translation
+### 7.7 Streaming Translation
 
 The adapter translates provider-specific streaming formats into the unified StreamEvent model.
 
@@ -1725,7 +1725,7 @@ Translation:
 
 Note: Gemini typically delivers function calls as complete objects in a single chunk, not incrementally. Emit both TOOL_CALL_START and TOOL_CALL_END for each function call.
 
-### 7.8Provider Quirks Reference
+### 7.8 Provider Quirks Reference
 
 A summary of provider-specific behaviors that adapters must handle:
 
@@ -1751,7 +1751,7 @@ A summary of provider-specific behaviors that adapters must handle:
 | Authentication               | Bearer token in Authorization    | `x-api-key` header                     | `key` query parameter               |
 | API versioning               | Via URL path (/v1/)              | `anthropic-version` header             | Via URL path (/v1beta/)             |
 
-### 7.9Adding a New Provider
+### 7.9 Adding a New Provider
 
 To add support for a new provider:
 
