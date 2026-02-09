@@ -216,4 +216,45 @@ describe("createLoggingMiddleware()", () => {
     expect(logs[0]).toContain("Stream");
     expect(collected).toHaveLength(1);
   });
+
+  it("logs default provider when none specified", async () => {
+    const logs: string[] = [];
+    const { complete, stream } = createLoggingMiddleware((msg) => logs.push(msg));
+
+    const handler = buildMiddlewareChain([complete], async () => makeResponse());
+    await handler(makeRequest());
+    expect(logs[0]).toContain("default");
+
+    const logs2: string[] = [];
+    const { stream: stream2 } = createLoggingMiddleware((msg) => logs2.push(msg));
+    async function* gen() { yield { type: StreamEventType.FINISH } as StreamEvent; }
+    const streamHandler = buildStreamMiddlewareChain([stream2], gen);
+    for await (const _e of streamHandler(makeRequest())) { /* drain */ }
+    expect(logs2[0]).toContain("default");
+  });
+
+  it("elapsed time is non-negative in log output", async () => {
+    const logs: string[] = [];
+    const { complete } = createLoggingMiddleware((msg) => logs.push(msg));
+
+    const handler = buildMiddlewareChain([complete], async () => makeResponse());
+    await handler(makeRequest());
+    // Extract latency value - format: "latency=Nms"
+    const latencyMatch = logs[1].match(/latency=(\d+)ms/);
+    expect(latencyMatch).not.toBeNull();
+    const latency = parseInt(latencyMatch![1], 10);
+    expect(latency).toBeGreaterThanOrEqual(0);
+  });
+
+  it("stream middleware handles provider=undefined with ?? default", async () => {
+    const logs: string[] = [];
+    const { stream } = createLoggingMiddleware((msg) => logs.push(msg));
+
+    async function* gen() { yield { type: StreamEventType.FINISH } as StreamEvent; }
+    const handler = buildStreamMiddlewareChain([stream], gen);
+    for await (const _e of handler(makeRequest({ provider: undefined }))) { /* drain */ }
+    expect(logs[0]).toContain("default");
+    // Should NOT use "&&" short-circuit which would give false/""
+    expect(logs[0]).not.toContain("false");
+  });
 });

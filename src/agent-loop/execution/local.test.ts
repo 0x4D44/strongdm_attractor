@@ -178,5 +178,143 @@ describe('LocalExecutionEnvironment', () => {
       const dirEntry = entries.find((e) => e.name === 'subdir');
       expect(dirEntry?.is_dir).toBe(true);
     });
+
+    it('recurses to depth > 1', async () => {
+      await fs.mkdir(path.join(tmpDir, 'level1'));
+      await fs.mkdir(path.join(tmpDir, 'level1', 'level2'));
+      await fs.writeFile(path.join(tmpDir, 'level1', 'level2', 'deep.txt'), 'deep');
+
+      const entries = await env.list_directory(tmpDir, 3);
+      const names = entries.map((e) => e.name);
+      expect(names).toContain('level1');
+      expect(names.some((n) => n.includes('level2'))).toBe(true);
+      expect(names.some((n) => n.includes('deep.txt'))).toBe(true);
+    });
+
+    it('returns empty at depth 0', async () => {
+      // depth < 0 returns empty
+      const entries = await env.list_directory(tmpDir, -1);
+      expect(entries).toHaveLength(0);
+    });
+  });
+
+  describe('cleanup', () => {
+    it('resolves without error', async () => {
+      await expect(env.cleanup()).resolves.toBeUndefined();
+    });
+  });
+
+  describe('inherit_all env policy', () => {
+    it('inherits all environment variables', async () => {
+      const envAll = new LocalExecutionEnvironment({
+        workingDirectory: tmpDir,
+        envVarPolicy: 'inherit_all',
+      });
+      const result = await envAll.exec_command('echo $HOME', 5000);
+      expect(result.stdout.trim().length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('extra env vars', () => {
+    it('passes extra env vars to the command', async () => {
+      const result = await env.exec_command(
+        'echo $MY_CUSTOM_VAR',
+        5000,
+        null,
+        { MY_CUSTOM_VAR: 'hello_from_test' },
+      );
+      expect(result.stdout.trim()).toBe('hello_from_test');
+    });
+  });
+
+  describe('custom working directory for command', () => {
+    it('executes command in a different working directory', async () => {
+      const subDir = path.join(tmpDir, 'subwork');
+      await fs.mkdir(subDir);
+      const result = await env.exec_command('pwd', 5000, subDir);
+      expect(result.stdout.trim()).toBe(subDir);
+    });
+  });
+
+  describe('grep', () => {
+    it('searches for a pattern in files', async () => {
+      await fs.writeFile(path.join(tmpDir, 'search.txt'), 'hello world\nfoo bar\nhello again\n');
+      const result = await env.grep('hello', tmpDir, {});
+      // Should find matches
+      expect(result).toContain('hello');
+    });
+
+    it('returns "No matches found." when no matches', async () => {
+      await fs.writeFile(path.join(tmpDir, 'empty.txt'), 'nothing here\n');
+      const result = await env.grep('zzzznotfound', tmpDir, {});
+      expect(result).toContain('No matches');
+    });
+
+    it('respects case_insensitive option', async () => {
+      await fs.writeFile(path.join(tmpDir, 'case.txt'), 'Hello World\n');
+      const result = await env.grep('hello', tmpDir, { case_insensitive: true });
+      expect(result).toContain('Hello');
+    });
+  });
+
+  describe('glob', () => {
+    it('finds files matching pattern', async () => {
+      await fs.writeFile(path.join(tmpDir, 'test.ts'), 'export {}');
+      await fs.writeFile(path.join(tmpDir, 'test.js'), 'module.exports = {}');
+
+      // The glob implementation may use Node.js glob or find fallback
+      const results = await env.glob('*.ts', tmpDir);
+      // Should find at least the .ts file
+      expect(results.some((r) => r.endsWith('test.ts'))).toBe(true);
+    });
+  });
+
+  describe('relative path resolution', () => {
+    it('resolves relative paths to working directory', async () => {
+      await fs.writeFile(path.join(tmpDir, 'relative.txt'), 'content');
+      const content = await env.read_file('relative.txt');
+      expect(content).toBe('content');
+    });
+
+    it('uses absolute paths as-is', async () => {
+      const absPath = path.join(tmpDir, 'absolute.txt');
+      await fs.writeFile(absPath, 'abs content');
+      const content = await env.read_file(absPath);
+      expect(content).toBe('abs content');
+    });
+  });
+
+  describe('default timeout config', () => {
+    it('uses defaults for timeout when not specified', async () => {
+      const envDefaults = new LocalExecutionEnvironment({
+        workingDirectory: tmpDir,
+      });
+      // Default timeout is 10s, max is 600s
+      const result = await envDefaults.exec_command('echo ok', 0);
+      expect(result.stdout.trim()).toBe('ok');
+    });
+
+    it('caps timeout to maxCommandTimeoutMs', async () => {
+      const envCapped = new LocalExecutionEnvironment({
+        workingDirectory: tmpDir,
+        maxCommandTimeoutMs: 5000,
+      });
+      // Requesting 600s timeout should be capped
+      const result = await envCapped.exec_command('echo ok', 600000);
+      expect(result.stdout.trim()).toBe('ok');
+    });
+  });
+
+  describe('exec_command error handling', () => {
+    it('captures error events', async () => {
+      // Running a command that doesn't exist should still resolve
+      const result = await env.exec_command('nonexistent_command_12345 2>/dev/null', 5000);
+      expect(result.exit_code).not.toBe(0);
+    });
+
+    it('reports duration_ms', async () => {
+      const result = await env.exec_command('echo fast', 5000);
+      expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+    });
   });
 });

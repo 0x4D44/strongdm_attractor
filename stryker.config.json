@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker/master/packages/core/schema/stryker-core.schema.json",
+  "testRunner": "vitest",
+  "checkers": ["typescript"],
+  "tsconfigFile": "tsconfig.json",
+  "mutate": [
+    "src/attractor/conditions.ts",
+    "src/attractor/engine/edge-selection.ts",
+    "src/attractor/parser/dot-lexer.ts",
+    "src/unified-llm/utils/retry.ts",
+    "src/unified-llm/middleware.ts"
+  ],
+  "reporters": ["html", "clear-text", "progress"],
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": "always"
+}

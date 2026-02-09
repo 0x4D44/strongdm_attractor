@@ -227,6 +227,69 @@ describe('SubAgentManager', () => {
     expect((events[0] as { result: { success: boolean } }).result.success).toBe(true);
   });
 
+  it('sendInput throws on nonexistent agent', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('done')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    await expect(
+      manager.sendInput('nonexistent-id', 'hello'),
+    ).rejects.toThrow('Subagent not found');
+  });
+
+  it('sendInput throws on non-running agent', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('done')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'fast task' });
+
+    // Wait for it to complete
+    await manager.wait(handle.id);
+
+    // Now try to send input to a completed agent
+    await expect(
+      manager.sendInput(handle.id, 'late message'),
+    ).rejects.toThrow('not running');
+  });
+
+  it('spawn with optional model override', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('done')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({
+      task: 'do stuff',
+      model: 'custom-model',
+      max_turns: 5,
+    });
+
+    expect(handle.id).toBeDefined();
+    expect(handle.status).toBe('running');
+
+    // Wait for completion
+    const result = await manager.wait(handle.id);
+    expect(result.success).toBe(true);
+  });
+
   it('failed child session: LLM error leads to completed with empty output', async () => {
     // When the LLM rejects, Session.submit() catches the error internally
     // and transitions to CLOSED state. The promise does NOT reject, so

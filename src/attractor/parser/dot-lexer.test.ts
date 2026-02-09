@@ -223,3 +223,175 @@ describe('DotLexer string escaping', () => {
     expect(tokens[0].value).toBe('\\x');
   });
 });
+
+describe('DotLexer - mutant-killing tests', () => {
+  it('token values for single-char tokens are correct', () => {
+    const tokens = new DotLexer('{ } [ ] , ; =').tokenize();
+    expect(tokens[0].value).toBe('{');
+    expect(tokens[1].value).toBe('}');
+    expect(tokens[2].value).toBe('[');
+    expect(tokens[3].value).toBe(']');
+    expect(tokens[4].value).toBe(',');
+    expect(tokens[5].value).toBe(';');
+    expect(tokens[6].value).toBe('=');
+  });
+
+  it('arrow value is "->"', () => {
+    const tokens = new DotLexer('A -> B').tokenize();
+    expect(tokens[1].value).toBe('->');
+  });
+
+  it('dot value is "."', () => {
+    const tokens = new DotLexer('foo.bar').tokenize();
+    expect(tokens[1].value).toBe('.');
+  });
+
+  it('EOF value is empty string', () => {
+    const tokens = new DotLexer('x').tokenize();
+    const eof = tokens[tokens.length - 1];
+    expect(eof.type).toBe(TokenType.EOF);
+    expect(eof.value).toBe('');
+  });
+
+  it('tracks line and column correctly', () => {
+    const tokens = new DotLexer('A\nB\nC').tokenize();
+    expect(tokens[0].line).toBe(1);
+    expect(tokens[0].column).toBe(1);
+    expect(tokens[1].line).toBe(2);
+    expect(tokens[1].column).toBe(1);
+    expect(tokens[2].line).toBe(3);
+    expect(tokens[2].column).toBe(1);
+  });
+
+  it('tracks column correctly within a line', () => {
+    const tokens = new DotLexer('A B C').tokenize();
+    expect(tokens[0].column).toBe(1);
+    expect(tokens[1].column).toBe(3);
+    expect(tokens[2].column).toBe(5);
+  });
+
+  it('line tracking across multiple newlines', () => {
+    const tokens = new DotLexer('A\n\n\nB').tokenize();
+    expect(tokens[0].line).toBe(1);
+    expect(tokens[1].line).toBe(4);
+  });
+
+  it('throws on unexpected character', () => {
+    expect(() => new DotLexer('@').tokenize()).toThrow(/Unexpected character/);
+  });
+
+  it('error message includes line and column info', () => {
+    expect(() => new DotLexer('A\n@').tokenize()).toThrow(/line 2/);
+  });
+
+  it('undirected edge error has line info', () => {
+    expect(() => new DotLexer('A -- B').tokenize()).toThrow(/line 1/);
+  });
+
+  it('digit 9 is recognized as a digit', () => {
+    const tokens = new DotLexer('9').tokenize();
+    expect(tokens[0].type).toBe(TokenType.INTEGER);
+    expect(tokens[0].value).toBe('9');
+  });
+
+  it('negative number at end of input', () => {
+    const tokens = new DotLexer('-42').tokenize();
+    expect(tokens[0].type).toBe(TokenType.INTEGER);
+    expect(tokens[0].value).toBe('-42');
+  });
+
+  it('float decimal digits parsed completely', () => {
+    const tokens = new DotLexer('1.23').tokenize();
+    expect(tokens[0].type).toBe(TokenType.FLOAT);
+    expect(tokens[0].value).toBe('1.23');
+  });
+
+  it('integer followed by dot (not a float)', () => {
+    // "42." where there's no digit after the dot
+    const tokens = new DotLexer('42.x').tokenize();
+    expect(tokens[0].type).toBe(TokenType.INTEGER);
+    expect(tokens[0].value).toBe('42');
+    expect(tokens[1].type).toBe(TokenType.DOT);
+    expect(tokens[2].type).toBe(TokenType.IDENTIFIER);
+  });
+
+  it('duration suffix advances position correctly', () => {
+    // After duration "100ms", the next token should be separate
+    const tokens = new DotLexer('100ms x').tokenize();
+    expect(tokens[0].type).toBe(TokenType.DURATION);
+    expect(tokens[0].value).toBe('100ms');
+    expect(tokens[1].type).toBe(TokenType.IDENTIFIER);
+    expect(tokens[1].value).toBe('x');
+  });
+
+  it('duration suffix ms not confused with identifier', () => {
+    // "100msg" - "ms" followed by "g" should NOT be a duration
+    const tokens = new DotLexer('100msg').tokenize();
+    // The regex has a word boundary check, so "msg" doesn't match
+    expect(tokens[0].type).toBe(TokenType.INTEGER);
+    expect(tokens[0].value).toBe('100');
+    expect(tokens[1].type).toBe(TokenType.IDENTIFIER);
+    expect(tokens[1].value).toBe('msg');
+  });
+
+  it('float number is not treated as duration', () => {
+    const tokens = new DotLexer('1.5').tokenize();
+    expect(tokens[0].type).toBe(TokenType.FLOAT);
+    // floats should not have duration suffix applied
+  });
+
+  it('peek returns empty string past end of input', () => {
+    // A '-' at end of input (not followed by anything)
+    // should hit the 'peek' boundary -> '' which is not '>' so not arrow
+    expect(() => new DotLexer('A -').tokenize()).toThrow();
+  });
+
+  it('escape at end of string body', () => {
+    // Backslash right before end of input inside a string
+    expect(() => new DotLexer('"hello\\').tokenize()).toThrow(/Unterminated/);
+  });
+
+  it('handles empty input', () => {
+    const tokens = new DotLexer('').tokenize();
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].type).toBe(TokenType.EOF);
+  });
+
+  it('handles whitespace-only input', () => {
+    const tokens = new DotLexer('   \n\t  ').tokenize();
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].type).toBe(TokenType.EOF);
+  });
+});
+
+describe('stripComments - mutant-killing tests', () => {
+  it('line comment at end of file (no trailing newline)', () => {
+    const result = stripComments('hello // comment at end');
+    expect(result).toBe('hello ');
+  });
+
+  it('block comment with * but not followed by /', () => {
+    const result = stripComments('a /* b * c */ d');
+    expect(result).toBe('a  d');
+  });
+
+  it('slash not followed by slash or star is preserved', () => {
+    const result = stripComments('a / b');
+    expect(result).toBe('a / b');
+  });
+
+  it('block comment preserves correct number of newlines', () => {
+    const result = stripComments('a /* line1\nline2\nline3 */ b');
+    expect(result).toBe('a \n\n b');
+  });
+
+  it('handles block comment at end of file (unterminated)', () => {
+    const result = stripComments('hello /* unclosed');
+    expect(result).toBe('hello ');
+  });
+
+  it('block comment with star at end of content', () => {
+    const result = stripComments('/* star* */ rest');
+    expect(result).toBe(' rest');
+  });
+});

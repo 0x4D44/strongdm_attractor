@@ -102,4 +102,139 @@ describe('resolveKey', () => {
     const ctx = makeContext({ mykey: 'myval' });
     expect(resolveKey('mykey', outcome, ctx)).toBe('myval');
   });
+
+  it('missing unqualified key returns empty string', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(resolveKey('nokey', outcome, ctx)).toBe('');
+  });
+
+  it('preferred_label returns empty string when absent', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(resolveKey('preferred_label', outcome, ctx)).toBe('');
+  });
+
+  it('context.* tries full key first, then short key', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    // Context has both "context.x" and "x" keys
+    const ctx = makeContext({ 'context.x': 'full', x: 'short' });
+    expect(resolveKey('context.x', outcome, ctx)).toBe('full');
+  });
+
+  it('context.* falls back to short key if full key not found', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ x: 'short' });
+    expect(resolveKey('context.x', outcome, ctx)).toBe('short');
+  });
+
+  it('context.* distinguishes from non-context keys', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ myvar: 'val' });
+    // "context." prefix should not match "myvar"
+    expect(resolveKey('context.myvar', outcome, ctx)).toBe('val');
+    expect(resolveKey('myvar', outcome, ctx)).toBe('val');
+    // But "context.other" should return '' when "other" is missing
+    expect(resolveKey('context.other', outcome, ctx)).toBe('');
+  });
+
+  it('handles null context values (returns empty string)', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ nullval: null });
+    expect(resolveKey('nullval', outcome, ctx)).toBe('');
+  });
+
+  it('trims whitespace from key', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ key: 'val' });
+    expect(resolveKey('  key  ', outcome, ctx)).toBe('val');
+  });
+});
+
+describe('evaluateCondition - bare key truthiness', () => {
+  it('bare key with truthy value returns true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: 'yes' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(true);
+  });
+
+  it('bare key with empty string returns false', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: '' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(false);
+  });
+
+  it('bare key with "0" returns false', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: '0' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(false);
+  });
+
+  it('bare key with "false" returns false', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: 'false' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(false);
+  });
+
+  it('bare key with "1" returns true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: '1' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(true);
+  });
+
+  it('bare key with "true" returns true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext({ flag: 'true' });
+    expect(evaluateCondition('flag', outcome, ctx)).toBe(true);
+  });
+
+  it('missing bare key returns false', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('missing', outcome, ctx)).toBe(false);
+  });
+});
+
+describe('evaluateCondition - quoted values (unquote)', () => {
+  it('matches quoted string values', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('outcome="success"', outcome, ctx)).toBe(true);
+    expect(evaluateCondition('outcome="fail"', outcome, ctx)).toBe(false);
+  });
+
+  it('not-equals with quoted values', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('outcome!="fail"', outcome, ctx)).toBe(true);
+    expect(evaluateCondition('outcome!="success"', outcome, ctx)).toBe(false);
+  });
+
+  it('unquote only strips matching double quotes', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    // No quotes - value used as-is
+    expect(evaluateCondition('outcome=success', outcome, ctx)).toBe(true);
+  });
+});
+
+describe('evaluateCondition - empty clause handling', () => {
+  it('empty clause in conjunction is treated as true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    // Trailing && creates an empty clause
+    expect(evaluateCondition('outcome=success && ', outcome, ctx)).toBe(true);
+  });
+
+  it('handles whitespace-only condition', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('   ', outcome, ctx)).toBe(true);
+  });
+
+  it('handles null-ish condition', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('', outcome, ctx)).toBe(true);
+  });
 });
