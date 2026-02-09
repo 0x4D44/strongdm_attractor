@@ -21,6 +21,9 @@ npx vitest run --coverage
 
 # Mutation testing (targets 5 critical modules, takes ~60s)
 npx stryker run
+
+# Full suite: type-check + tests + coverage + mutation (cross-platform)
+npm run test:full
 ```
 
 ## Architecture

@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "test:full": "./full-test.sh"
+    "test:full": "tsc --noEmit && vitest run --coverage && stryker run",
+    "test:full:bash": "./full-test.sh"
   },
   "license": "Apache-2.0",
   "engines": {

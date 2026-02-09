@@ -168,10 +168,11 @@ Produces a text summary and an HTML report in `reports/mutation/mutation.html`.
 ### Full Test Suite (All Categories)
 
 ```bash
-./full-test.sh                       # Unit + E2E + fuzz + coverage + mutation
+npm run test:full                    # Cross-platform (Windows, macOS, Linux)
+./full-test.sh                       # Bash only (WSL/Linux/macOS) — colored summary
 ```
 
-Runs all test categories in sequence with a final summary. See the script for details.
+`test:full` runs type-check → all tests with coverage → mutation testing. Works on Windows CMD, PowerShell, and Unix. `full-test.sh` runs the same steps with colored pass/fail output per stage.
 
 ## Test Conventions
 

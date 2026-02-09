@@ -265,6 +265,7 @@ npm test                   # Run all 887 tests
 npm run test:watch         # Watch mode
 npx vitest run --coverage  # Coverage report (90% statements)
 npx stryker run            # Mutation testing (85% mutation score)
+npm run test:full          # Everything: type-check + coverage + mutation
 ```
 
 See [TESTS.md](./TESTS.md) for detailed test infrastructure documentation.
