@@ -98,4 +98,94 @@ describe('Context', () => {
     const ctx = new Context();
     expect(ctx.get('nonexistent')).toBeUndefined();
   });
+
+  it('nested key with null intermediate returns default', () => {
+    const ctx = new Context();
+    ctx.set('obj', { nested: null });
+    expect(ctx.get('obj.nested.deep', 'fallback')).toBe('fallback');
+  });
+
+  it('nested key with non-object intermediate returns default', () => {
+    const ctx = new Context();
+    ctx.set('obj', { nested: 42 });
+    expect(ctx.get('obj.nested.deep', 'fallback')).toBe('fallback');
+  });
+
+  it('nested key with undefined intermediate returns default', () => {
+    const ctx = new Context();
+    ctx.set('obj', { nested: undefined });
+    expect(ctx.get('obj.nested.deep', 'fallback')).toBe('fallback');
+  });
+
+  it('getString returns default for null value', () => {
+    const ctx = new Context();
+    ctx.set('key', null);
+    expect(ctx.getString('key', 'default')).toBe('default');
+  });
+
+  it('deep nested key with multiple levels', () => {
+    const ctx = new Context();
+    ctx.set('a', { b: { c: { d: 'found' } } });
+    expect(ctx.get('a.b.c.d')).toBe('found');
+  });
+
+  it('prefix matching: dot-separated flat key takes precedence', () => {
+    const ctx = new Context();
+    ctx.set('a.b', 'flat_value');
+    ctx.set('a', { b: 'nested_value' });
+    // 'a.b' as a flat key should be found first
+    expect(ctx.get('a.b')).toBe('flat_value');
+  });
+
+  it('nested key from object-valued prefix', () => {
+    const ctx = new Context();
+    ctx.set('config', { database: { host: 'localhost', port: 5432 } });
+    expect(ctx.get('config.database.host')).toBe('localhost');
+    expect(ctx.get('config.database.port')).toBe(5432);
+  });
+
+  it('returns defaultValue for nested key when prefix exists but path fails', () => {
+    const ctx = new Context();
+    ctx.set('obj', { a: 'value' });
+    expect(ctx.get('obj.b.c', 'missing')).toBe('missing');
+  });
+
+  it('progressive prefix matching finds longer prefix over shorter', () => {
+    // Set 'a' as an object but also set 'a.b' directly as a map entry
+    // The progressive matcher should find the 'a.b' prefix when looking for 'a.b.c'
+    const ctx = new Context();
+    ctx.set('a', { b: 'wrong' }); // this is the short prefix
+    ctx.set('a.b', { c: 'right' }); // this is the longer prefix
+    expect(ctx.get('a.b.c')).toBe('right');
+  });
+
+  it('nested key resolution where entire key is a prefix match at full length', () => {
+    // This tests the path where i === parts.length in the progressive prefix matching
+    // 'a.b.c' as a flat key should be found when 'a.b' is also set
+    const ctx = new Context();
+    ctx.set('a.b', { c: 'nested_value' });
+    expect(ctx.get('a.b.c')).toBe('nested_value');
+  });
+
+  it('nested key with string intermediate returns default', () => {
+    const ctx = new Context();
+    ctx.set('obj', { nested: 'a string' });
+    expect(ctx.get('obj.nested.deep', 'nope')).toBe('nope');
+  });
+
+  it('nested key where prefix found at i !== parts.length descends into object (line 31)', () => {
+    // Tests the branch at line 31: i !== parts.length
+    // Set 'a' as an object with nested 'b.c' — force prefix match at i=1, then descend
+    const ctx = new Context();
+    ctx.set('a', { b: { c: 1 } });
+    expect(ctx.get('a.b.c')).toBe(1);
+  });
+
+  it('nested key where prefix match at exact length returns directly (line 31 true branch)', () => {
+    // Tests the branch at line 31: i === parts.length
+    // This is a flat dotted key that matches the full path
+    const ctx = new Context();
+    ctx.set('x.y', 'flat_val');
+    expect(ctx.get('x.y')).toBe('flat_val');
+  });
 });

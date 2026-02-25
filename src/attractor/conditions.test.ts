@@ -237,4 +237,26 @@ describe('evaluateCondition - empty clause handling', () => {
     const ctx = makeContext();
     expect(evaluateCondition('', outcome, ctx)).toBe(true);
   });
+
+  it('empty clause after split (double &&) is treated as true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    // "outcome=success && && outcome=success" has an empty clause in the middle
+    expect(evaluateCondition('outcome=success &&  && outcome=success', outcome, ctx)).toBe(true);
+  });
+
+  it('leading && creates empty clause which is treated as true', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    expect(evaluateCondition('&& outcome=success', outcome, ctx)).toBe(true);
+  });
+});
+
+describe('evaluateClause - empty trimmed clause returns true (line 66)', () => {
+  it('clause that is only whitespace returns true via evaluateCondition', () => {
+    const outcome = makeOutcomeWith(StageStatus.SUCCESS);
+    const ctx = makeContext();
+    // Each clause between && that trims to empty should return true
+    expect(evaluateCondition('   &&   ', outcome, ctx)).toBe(true);
+  });
 });

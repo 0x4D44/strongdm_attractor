@@ -147,6 +147,94 @@ describe('ToolRegistry', () => {
       expect(result.valid).toBe(false);
       expect(result.error).toContain('expected type integer');
     });
+
+    it('returns valid when schema is falsy (null)', () => {
+      const reg = new ToolRegistry();
+      reg.register({
+        definition: {
+          name: 'no_schema',
+          description: 'Tool with null schema',
+          parameters: null as unknown as Record<string, unknown>,
+        },
+        executor: async () => 'ok',
+      });
+      const result = reg.validate('no_schema', { anything: 'goes' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('skips unknown properties not in schema (line 78)', () => {
+      const reg = new ToolRegistry();
+      reg.register(
+        makeTool('my_tool', {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+          },
+          required: ['name'],
+        }),
+      );
+      // Pass 'name' plus an extra property not in schema
+      const result = reg.validate('my_tool', { name: 'test', extra_prop: 42 });
+      expect(result.valid).toBe(true);
+    });
+
+    it('fails on type mismatch: expected number, got string (line 85)', () => {
+      const reg = new ToolRegistry();
+      reg.register(
+        makeTool('my_tool', {
+          type: 'object',
+          properties: {
+            amount: { type: 'number' },
+          },
+        }),
+      );
+      const result = reg.validate('my_tool', { amount: 'not_a_number' });
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('expected type number');
+    });
+
+    it('fails on type mismatch: expected boolean, got string (line 86)', () => {
+      const reg = new ToolRegistry();
+      reg.register(
+        makeTool('my_tool', {
+          type: 'object',
+          properties: {
+            flag: { type: 'boolean' },
+          },
+        }),
+      );
+      const result = reg.validate('my_tool', { flag: 'true' });
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain('expected type boolean');
+    });
+
+    it('passes when integer value is actual integer (line 84)', () => {
+      const reg = new ToolRegistry();
+      reg.register(
+        makeTool('my_tool', {
+          type: 'object',
+          properties: {
+            count: { type: 'integer' },
+          },
+        }),
+      );
+      const result = reg.validate('my_tool', { count: 5 });
+      expect(result.valid).toBe(true);
+    });
+
+    it('returns valid when schema is not an object (string)', () => {
+      const reg = new ToolRegistry();
+      reg.register({
+        definition: {
+          name: 'bad_schema',
+          description: 'Tool with non-object schema',
+          parameters: 'not_an_object' as unknown as Record<string, unknown>,
+        },
+        executor: async () => 'ok',
+      });
+      const result = reg.validate('bad_schema', { anything: 'goes' });
+      expect(result.valid).toBe(true);
+    });
   });
 
   describe('dispatch', () => {
@@ -193,6 +281,18 @@ describe('ToolRegistry', () => {
       expect(result.is_error).toBe(true);
       expect(result.output).toContain('Tool error');
       expect(result.output).toContain('internal failure');
+    });
+
+    it('executor throwing non-Error uses String() fallback (line 130)', async () => {
+      const reg = new ToolRegistry();
+      reg.register(
+        makeTool('string_thrower', undefined, async () => {
+          throw 'plain string error';
+        }),
+      );
+      const result = await reg.dispatch('string_thrower', {}, mockEnv);
+      expect(result.is_error).toBe(true);
+      expect(result.output).toContain('plain string error');
     });
   });
 });

@@ -526,4 +526,116 @@ describe('parseRateLimitHeaders', () => {
     expect(info!.tokens_limit).toBeUndefined();
     expect(info!.reset_at).toBeUndefined();
   });
+
+  it('returns undefined for requests_remaining when only limit is present', () => {
+    // Exercises the false branch of `remaining ? parseInt(remaining, 10) : undefined`
+    const headers = new Headers({
+      'x-ratelimit-limit-requests': '100',
+    });
+
+    const info = parseRateLimitHeaders(headers);
+    expect(info).toBeDefined();
+    expect(info!.requests_remaining).toBeUndefined();
+    expect(info!.requests_limit).toBe(100);
+  });
+
+  it('returns undefined for tokens_limit when only tokens_remaining present', () => {
+    const headers = new Headers({
+      'x-ratelimit-remaining-tokens': '5000',
+    });
+
+    const info = parseRateLimitHeaders(headers);
+    expect(info).toBeDefined();
+    expect(info!.tokens_remaining).toBe(5000);
+    expect(info!.tokens_limit).toBeUndefined();
+  });
+
+  it('returns undefined for reset_at when only tokens headers present', () => {
+    const headers = new Headers({
+      'x-ratelimit-limit-tokens': '10000',
+    });
+
+    const info = parseRateLimitHeaders(headers);
+    expect(info).toBeDefined();
+    expect(info!.tokens_limit).toBe(10000);
+    expect(info!.reset_at).toBeUndefined();
+    expect(info!.requests_remaining).toBeUndefined();
+    expect(info!.requests_limit).toBeUndefined();
+    expect(info!.tokens_remaining).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Uncovered branch coverage
+// ---------------------------------------------------------------------------
+
+describe('httpRequest — uncovered branches', () => {
+  it('throws AbortError when Error has name "AbortError" (non-DOMException)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    mockFetch.mockRejectedValue(err);
+
+    await expect(
+      httpRequest({ url: 'https://example.com', signal: controller.signal }),
+    ).rejects.toThrow(AbortError);
+  });
+
+  it('throws RequestTimeoutError for Error with name "AbortError" without external signal', async () => {
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    mockFetch.mockRejectedValue(err);
+
+    await expect(
+      httpRequest({ url: 'https://example.com', timeout: 100 }),
+    ).rejects.toThrow(RequestTimeoutError);
+  });
+});
+
+describe('httpStreamRequest — uncovered branches', () => {
+  it('throws AbortError when Error has name "AbortError" (non-DOMException)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    mockFetch.mockRejectedValue(err);
+
+    await expect(
+      httpStreamRequest({ url: 'https://example.com', signal: controller.signal }),
+    ).rejects.toThrow(AbortError);
+  });
+
+  it('throws RequestTimeoutError for Error with name "AbortError" without external signal', async () => {
+    const err = new Error('The operation was aborted');
+    err.name = 'AbortError';
+    mockFetch.mockRejectedValue(err);
+
+    await expect(
+      httpStreamRequest({ url: 'https://example.com', timeout: 100 }),
+    ).rejects.toThrow(RequestTimeoutError);
+  });
+
+  it('handles non-Error thrown values with String() conversion', async () => {
+    mockFetch.mockRejectedValue('string error');
+
+    await expect(
+      httpStreamRequest({ url: 'https://example.com' }),
+    ).rejects.toThrow(NetworkError);
+  });
+
+  it('handles non-Error thrown values with undefined cause', async () => {
+    mockFetch.mockRejectedValue(42);
+
+    try {
+      await httpStreamRequest({ url: 'https://example.com' });
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(NetworkError);
+      expect((err as NetworkError).cause).toBeUndefined();
+      expect((err as NetworkError).message).toContain('42');
+    }
+  });
 });

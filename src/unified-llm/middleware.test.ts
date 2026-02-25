@@ -164,6 +164,32 @@ describe("wrapMiddlewareForStream()", () => {
     expect(capturedTemp).toBe(0.5);
   });
 
+  it("catches middleware errors on dummy response and still passes request through", async () => {
+    // Middleware that reads response fields — will throw on the dummy {} response
+    const mw: Middleware = async (req, next) => {
+      const resp = await next({ ...req, temperature: 0.7 });
+      // Access a property that doesn't exist on the dummy response, causing a throw
+      resp.usage.total_tokens;
+      return resp;
+    };
+    const wrapped = wrapMiddlewareForStream(mw);
+
+    let capturedTemp: number | undefined;
+    async function* gen(req: Request) {
+      capturedTemp = req.temperature;
+      yield { type: StreamEventType.FINISH } as StreamEvent;
+    }
+
+    const handler = buildStreamMiddlewareChain([wrapped], gen);
+    const collected: StreamEvent[] = [];
+    for await (const e of handler(makeRequest())) {
+      collected.push(e);
+    }
+    // Middleware threw on dummy response, but request transformation was captured
+    expect(capturedTemp).toBe(0.7);
+    expect(collected).toHaveLength(1);
+  });
+
   it("passes through events unchanged", async () => {
     const mw: Middleware = async (req, next) => next(req);
     const wrapped = wrapMiddlewareForStream(mw);

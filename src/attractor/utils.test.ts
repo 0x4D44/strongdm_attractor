@@ -44,4 +44,9 @@ describe('parseDuration', () => {
     expect(parseDuration('900s')).toBe(900_000);
     expect(parseDuration('1000ms')).toBe(1000);
   });
+
+  it('unknown unit defaults to raw numeric value', () => {
+    expect(parseDuration('42x')).toBe(42);
+    expect(parseDuration('100foo')).toBe(100);
+  });
 });

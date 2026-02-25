@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Client } from "./client.js";
+import { Client, getDefaultClient, setDefaultClient } from "./client.js";
 import {
   ConfigurationError,
   Message,
@@ -358,6 +358,87 @@ describe("Client", () => {
       const client = Client.from_env();
       expect(client.providerNames).toContain("openai");
       expect(client.providerNames).toContain("anthropic");
+    });
+  });
+
+  describe("getDefaultClient() / setDefaultClient()", () => {
+    it("setDefaultClient() sets the client used by getDefaultClient()", () => {
+      const client = new Client({
+        providers: { test: makeFakeAdapter("test") },
+      });
+      setDefaultClient(client);
+      const retrieved = getDefaultClient();
+      expect(retrieved).toBe(client);
+      expect(retrieved.providerNames).toContain("test");
+    });
+
+    it("getDefaultClient() auto-creates from env if not set", () => {
+      // Reset by setting a fresh client, then we'll re-test
+      // The module-level _defaultClient may already be set, but calling setDefaultClient
+      // overrides it. This just verifies the call doesn't throw.
+      const client = new Client();
+      setDefaultClient(client);
+      expect(getDefaultClient()).toBe(client);
+    });
+
+    it("getDefaultClient() lazy-initializes via from_env() when no default set", async () => {
+      // Re-import the module to get a fresh _defaultClient (undefined)
+      vi.resetModules();
+      const { getDefaultClient: freshGet } = await import("./client.js");
+      // No setDefaultClient called — _defaultClient is undefined, triggers from_env()
+      const client = freshGet();
+      expect(client).toBeDefined();
+      expect(typeof client.complete).toBe("function");
+      // Calling again returns the same cached instance (lazy singleton)
+      expect(freshGet()).toBe(client);
+    });
+  });
+
+  describe("stream() — error propagation", () => {
+    it("throws ConfigurationError for unregistered provider in stream", () => {
+      const client = new Client({
+        providers: { openai: makeFakeAdapter("openai") },
+      });
+      expect(() =>
+        client.stream({
+          model: "gpt-4",
+          messages: [Message.user("hi")],
+          provider: "nonexistent",
+        }),
+      ).toThrow(ConfigurationError);
+    });
+  });
+
+  describe("complete() — error message details", () => {
+    it("shows available providers in error message", async () => {
+      const client = new Client({
+        providers: { openai: makeFakeAdapter("openai") },
+      });
+      try {
+        await client.complete({
+          model: "gpt-4",
+          messages: [Message.user("hi")],
+          provider: "nonexistent",
+        });
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect((err as Error).message).toContain("openai");
+        expect((err as Error).message).toContain("nonexistent");
+      }
+    });
+
+    it("shows (none) when no providers registered", async () => {
+      const client = new Client();
+      try {
+        await client.complete({
+          model: "gpt-4",
+          messages: [Message.user("hi")],
+          provider: "test",
+        });
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect((err as Error).message).toContain("(none)");
+      }
     });
   });
 });

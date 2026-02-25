@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SubAgentManager } from './subagent.js';
+import { SubAgentManager, createSubagentTools } from './subagent.js';
 import { Session } from './session.js';
 import { SessionState, EventKind } from './types.js';
 import type {
@@ -312,5 +312,338 @@ describe('SubAgentManager', () => {
     expect(result.success).toBe(true);
     expect(result.output).toBe('');
     expect(parent.subagents.get(handle.id)?.status).toBe('completed');
+  });
+
+  it('spawn error path: submit rejection triggers catch handler', async () => {
+    // To trigger the .catch() path in spawn(), we need the Session constructor
+    // to work but submit() to throw (not just have the LLM fail).
+    // We do this by making the child session's submit throw synchronously
+    // by mocking Session to make processInput throw a non-caught error.
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(() => {
+        // Throw a non-Error to test the String() fallback in catch
+        throw 'raw string error';
+      }),
+    };
+
+    // The processInput error is caught by Session.submit(), so to get
+    // the .catch() handler, we need processInput itself to reject
+    // unhandled. But Session.submit() has try/catch. So the .catch()
+    // path is only hit if Session.submit() itself rejects.
+    // Let's verify that with a CLOSED session.
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: {
+        complete: vi.fn().mockResolvedValue(makeResponse('ok')),
+      },
+    });
+
+    // Close parent so child session's submit will work, but the child
+    // session needs to fail. We make the child's LLM client fail in
+    // a way that submit() doesn't catch: submit() catches errors, so
+    // the .catch() only fires if the promise itself rejects.
+
+    // Actually, the simplest way: override Session prototype to make submit throw
+    const origSubmit = Session.prototype.submit;
+    Session.prototype.submit = vi.fn().mockRejectedValue(new Error('submit exploded'));
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'test error path' });
+
+    // Wait for the background promise to settle
+    const result = await manager.wait(handle.id);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain('submit exploded');
+    expect(parent.subagents.get(handle.id)?.status).toBe('failed');
+
+    // Restore
+    Session.prototype.submit = origSubmit;
+  });
+
+  it('spawn error path emits SUBAGENT_COMPLETE on failure', async () => {
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: {
+        complete: vi.fn().mockResolvedValue(makeResponse('ok')),
+      },
+    });
+
+    const events: Record<string, unknown>[] = [];
+    parent.event_emitter.on(EventKind.SUBAGENT_COMPLETE, (e) =>
+      events.push(e.data),
+    );
+
+    const origSubmit = Session.prototype.submit;
+    Session.prototype.submit = vi.fn().mockRejectedValue(new Error('kaboom'));
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'fail task' });
+    await manager.wait(handle.id);
+
+    expect(events.length).toBe(1);
+    expect((events[0] as { result: { success: boolean } }).result.success).toBe(false);
+
+    Session.prototype.submit = origSubmit;
+  });
+
+  it('spawn error path handles non-Error rejection', async () => {
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: {
+        complete: vi.fn().mockResolvedValue(makeResponse('ok')),
+      },
+    });
+
+    const origSubmit = Session.prototype.submit;
+    Session.prototype.submit = vi.fn().mockRejectedValue('string rejection');
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'non-error fail' });
+    const result = await manager.wait(handle.id);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toBe('string rejection');
+
+    Session.prototype.submit = origSubmit;
+  });
+
+  it('wait returns fallback result when no promise and no result', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('ok')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'test task' });
+
+    // Access private _agents map and clear promise + result to exercise fallback
+    const agents = (manager as unknown as { _agents: Map<string, { promise?: Promise<void>; result: unknown }> })._agents;
+    const agent = agents.get(handle.id)!;
+    // Wait for the actual promise first so it doesn't run in background
+    if (agent.promise) await agent.promise;
+    // Now clear both to simulate the edge case
+    delete agent.promise;
+    agent.result = null;
+
+    const result = await manager.wait(handle.id);
+    expect(result.output).toBe('');
+    expect(result.success).toBe(false);
+    expect(result.turns_used).toBe(0);
+  });
+
+  it('sendInput on running agent succeeds', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () => resolve(makeResponse('slow result')),
+              200,
+            ),
+          ),
+      ),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const handle = await manager.spawn({ task: 'long task' });
+
+    const msg = await manager.sendInput(handle.id, 'extra info');
+    expect(msg).toContain('Message sent');
+
+    // Clean up
+    await manager.close(handle.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createSubagentTools tests
+// ---------------------------------------------------------------------------
+
+describe('createSubagentTools', () => {
+  it('returns 4 tools with correct names', () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('done')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+
+    expect(tools).toHaveLength(4);
+    const names = tools.map((t) => t.definition.name);
+    expect(names).toContain('spawn_agent');
+    expect(names).toContain('send_input');
+    expect(names).toContain('wait');
+    expect(names).toContain('close_agent');
+  });
+
+  it('spawn_agent executor spawns and returns agent id', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('child output')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+    const spawnTool = tools.find((t) => t.definition.name === 'spawn_agent')!;
+
+    const result = await spawnTool.executor(
+      { task: 'do work' },
+      makeMinimalEnv(),
+    );
+    const parsed = JSON.parse(result);
+    expect(parsed.agent_id).toBeDefined();
+    expect(parsed.status).toBe('running');
+
+    // Clean up: wait for subagent
+    const waitTool = tools.find((t) => t.definition.name === 'wait')!;
+    await waitTool.executor({ agent_id: parsed.agent_id }, makeMinimalEnv());
+  });
+
+  it('spawn_agent executor passes optional args', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('done')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+    const spawnTool = tools.find((t) => t.definition.name === 'spawn_agent')!;
+
+    const result = await spawnTool.executor(
+      {
+        task: 'custom task',
+        working_dir: '/custom',
+        model: 'custom-model',
+        max_turns: 10,
+      },
+      makeMinimalEnv(),
+    );
+    const parsed = JSON.parse(result);
+    expect(parsed.agent_id).toBeDefined();
+
+    // Clean up
+    const waitTool = tools.find((t) => t.definition.name === 'wait')!;
+    await waitTool.executor({ agent_id: parsed.agent_id }, makeMinimalEnv());
+  });
+
+  it('send_input executor sends message to subagent', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve(makeResponse('slow')), 200),
+          ),
+      ),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+    const spawnTool = tools.find((t) => t.definition.name === 'spawn_agent')!;
+    const sendInputTool = tools.find((t) => t.definition.name === 'send_input')!;
+    const closeTool = tools.find((t) => t.definition.name === 'close_agent')!;
+
+    const spawnResult = JSON.parse(
+      await spawnTool.executor({ task: 'run' }, makeMinimalEnv()),
+    );
+
+    const sendResult = await sendInputTool.executor(
+      { agent_id: spawnResult.agent_id, message: 'more info' },
+      makeMinimalEnv(),
+    );
+    expect(sendResult).toContain('Message sent');
+
+    // Clean up
+    await closeTool.executor({ agent_id: spawnResult.agent_id }, makeMinimalEnv());
+  });
+
+  it('wait executor waits for completion and returns result', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue(makeResponse('final answer')),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+    const spawnTool = tools.find((t) => t.definition.name === 'spawn_agent')!;
+    const waitTool = tools.find((t) => t.definition.name === 'wait')!;
+
+    const spawnResult = JSON.parse(
+      await spawnTool.executor({ task: 'answer question' }, makeMinimalEnv()),
+    );
+
+    const waitResult = await waitTool.executor(
+      { agent_id: spawnResult.agent_id },
+      makeMinimalEnv(),
+    );
+    const parsed = JSON.parse(waitResult);
+    expect(parsed.success).toBe(true);
+    expect(parsed.output).toContain('final answer');
+    expect(parsed.turns_used).toBeGreaterThanOrEqual(1);
+  });
+
+  it('close_agent executor terminates subagent', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve(makeResponse('slow')), 200),
+          ),
+      ),
+    };
+    const parent = new Session({
+      provider_profile: makeMinimalProfile(),
+      execution_env: makeMinimalEnv(),
+      llm_client: client,
+    });
+
+    const manager = new SubAgentManager(parent);
+    const tools = createSubagentTools(manager);
+    const spawnTool = tools.find((t) => t.definition.name === 'spawn_agent')!;
+    const closeTool = tools.find((t) => t.definition.name === 'close_agent')!;
+
+    const spawnResult = JSON.parse(
+      await spawnTool.executor({ task: 'run forever' }, makeMinimalEnv()),
+    );
+
+    const closeResult = await closeTool.executor(
+      { agent_id: spawnResult.agent_id },
+      makeMinimalEnv(),
+    );
+    expect(closeResult).toContain('closed');
   });
 });

@@ -165,6 +165,21 @@ describe('Gemini-specific tools', () => {
 
       expect(result).toContain('[Error: ENOENT]');
     });
+
+    it('handles non-Error thrown values via String()', async () => {
+      const profile = createGeminiProfile();
+      const env = makeEnv({
+        read_file: vi.fn().mockRejectedValue('string rejection'),
+      });
+
+      const tool = profile.tool_registry.get('read_many_files');
+      const result = await tool!.executor(
+        { file_paths: ['/broken.ts'] },
+        env,
+      );
+
+      expect(result).toContain('[Error: string rejection]');
+    });
   });
 
   describe('list_dir', () => {
@@ -233,6 +248,58 @@ describe('Gemini-specific tools', () => {
       const tool = profile.tool_registry.get('web_fetch');
       expect(tool).toBeDefined();
       expect(tool!.definition.name).toBe('web_fetch');
+    });
+
+    it('fetches URL and returns truncated text', async () => {
+      const mockText = 'Hello from the web!';
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => mockText,
+      }) as unknown as typeof fetch;
+
+      const profile = createGeminiProfile();
+      const env = makeEnv();
+      const tool = profile.tool_registry.get('web_fetch');
+      const result = await tool!.executor({ url: 'https://example.com' }, env);
+      expect(result).toBe('Hello from the web!');
+
+      globalThis.fetch = originalFetch;
+    });
+
+    it('throws on non-ok response', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+      }) as unknown as typeof fetch;
+
+      const profile = createGeminiProfile();
+      const env = makeEnv();
+      const tool = profile.tool_registry.get('web_fetch');
+      await expect(
+        tool!.executor({ url: 'https://example.com/missing' }, env),
+      ).rejects.toThrow('Failed to fetch URL (404)');
+
+      globalThis.fetch = originalFetch;
+    });
+
+    it('truncates response to 50000 characters', async () => {
+      const longText = 'x'.repeat(60000);
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => longText,
+      }) as unknown as typeof fetch;
+
+      const profile = createGeminiProfile();
+      const env = makeEnv();
+      const tool = profile.tool_registry.get('web_fetch');
+      const result = await tool!.executor({ url: 'https://example.com/big' }, env);
+      expect(result.length).toBe(50000);
+
+      globalThis.fetch = originalFetch;
     });
   });
 });

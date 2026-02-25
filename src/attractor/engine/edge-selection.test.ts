@@ -337,6 +337,53 @@ describe('selectEdge - additional coverage', () => {
     const selected = selectEdge('A', outcome, ctx, graph);
     expect(selected!.to).toBe('B');
   });
+
+  it('suggested_next_ids with non-matching ID falls through to weight', () => {
+    const edges = [
+      edge('A', 'B', { weight: 1 }),
+      edge('A', 'C', { weight: 10 }),
+    ];
+    const graph = makeGraph(edges);
+    const outcome = makeOutcome({
+      status: StageStatus.SUCCESS,
+      suggested_next_ids: ['Z'], // Z doesn't exist
+    });
+    const ctx = new Context();
+
+    const selected = selectEdge('A', outcome, ctx, graph);
+    expect(selected!.to).toBe('C'); // falls through to weight
+  });
+
+  it('suggested_next_ids picks first matching edge', () => {
+    const edges = [
+      edge('A', 'B', {}),
+      edge('A', 'C', {}),
+      edge('A', 'D', {}),
+    ];
+    const graph = makeGraph(edges);
+    const outcome = makeOutcome({
+      status: StageStatus.SUCCESS,
+      suggested_next_ids: ['C', 'B'],
+    });
+    const ctx = new Context();
+
+    const selected = selectEdge('A', outcome, ctx, graph);
+    expect(selected!.to).toBe('C');
+  });
+
+  it('weight tiebreaker with three edges of same weight', () => {
+    const edges = [
+      edge('A', 'Y', { weight: 3 }),
+      edge('A', 'X', { weight: 3 }),
+      edge('A', 'Z', { weight: 3 }),
+    ];
+    const graph = makeGraph(edges);
+    const outcome = makeOutcome({ status: StageStatus.SUCCESS });
+    const ctx = new Context();
+
+    const selected = selectEdge('A', outcome, ctx, graph);
+    expect(selected!.to).toBe('X'); // lexically first
+  });
 });
 
 describe('normalizeLabel - regex and trim mutant killers', () => {

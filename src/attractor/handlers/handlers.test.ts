@@ -205,6 +205,239 @@ describe('WaitHumanHandler', () => {
     const outcome = await handler.handle(node, new Context(), graph, makeTempDir());
     expect(outcome.status).toBe(StageStatus.FAIL);
   });
+
+  it('TIMEOUT with matching default_choice returns SUCCESS', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.TIMEOUT,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick one' });
+    (node.attrs as Record<string, unknown>)['human.default_choice'] = 'yes';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('yes');
+    expect(outcome.context_updates['human.gate.selected']).toBe('Y');
+  });
+
+  it('TIMEOUT with non-matching default_choice returns RETRY', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.TIMEOUT,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    (node.attrs as Record<string, unknown>)['human.default_choice'] = 'nonexistent';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes')],
+      [{ from: 'gate', to: 'yes', attrs: { label: 'Yes' } }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.RETRY);
+    expect(outcome.failure_reason).toContain('timeout');
+  });
+
+  it('TIMEOUT without default_choice returns RETRY', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.TIMEOUT,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes')],
+      [{ from: 'gate', to: 'yes', attrs: { label: 'Yes' } }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.RETRY);
+    expect(outcome.failure_reason).toContain('no default');
+  });
+
+  it('SKIPPED answer returns FAIL', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.SKIPPED,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes')],
+      [{ from: 'gate', to: 'yes', attrs: { label: 'Yes' } }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.FAIL);
+    expect(outcome.failure_reason).toContain('skipped');
+  });
+
+  it('uses edge.to as label fallback when edge has no label', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: 'next_step',
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('next_step')],
+      [{ from: 'gate', to: 'next_step' }] // no label attr
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('next_step');
+  });
+
+  it('TIMEOUT default_choice matches by key', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.TIMEOUT,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    (node.attrs as Record<string, unknown>)['human.default_choice'] = 'Y';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('yes');
+  });
+
+  it('TIMEOUT default_choice matches by label', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: AnswerValue.TIMEOUT,
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    (node.attrs as Record<string, unknown>)['human.default_choice'] = '[Y] Yes';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.context_updates['human.gate.label']).toBe('[Y] Yes');
+  });
+
+  it('answer matching by label text', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: '[N] No',
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('no');
+  });
+
+  it('answer matching by node target ID', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: 'no',
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('no');
+  });
+
+  it('falls back to first choice when answer matches nothing', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: 'zzzzz',
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Pick' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes'), makeNode('no')],
+      [
+        { from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } },
+        { from: 'gate', to: 'no', attrs: { label: '[N] No' } },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.suggested_next_ids).toContain('yes'); // first choice is fallback
+  });
+
+  it('uses node label as question text', async () => {
+    const mockInterviewer: Interviewer = {
+      ask: vi.fn().mockResolvedValue({
+        value: 'Y',
+        selected_option: { key: 'Y', label: '[Y] Yes' },
+      }),
+    };
+    const handler = new WaitHumanHandler(mockInterviewer);
+    const node = makeNode('gate', { shape: 'hexagon', label: 'Custom Question?' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('yes')],
+      [{ from: 'gate', to: 'yes', attrs: { label: '[Y] Yes' } }]
+    );
+
+    await handler.handle(node, ctx, graph, makeTempDir());
+    const calledQuestion = (mockInterviewer.ask as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(calledQuestion.text).toBe('Custom Question?');
+  });
 });
 
 describe('ToolHandler', () => {
@@ -229,6 +462,30 @@ describe('ToolHandler', () => {
     const outcome = await handler.handle(node, ctx, graph, makeTempDir());
     expect(outcome.status).toBe(StageStatus.FAIL);
     expect(outcome.failure_reason).toContain('No tool_command');
+  });
+
+  it('uses default timeout of 30000ms when timeout is not specified', async () => {
+    const handler = new ToolHandler();
+    const node = makeNode('tool', { shape: 'parallelogram' });
+    // No timeout attr set -> defaults to 30000ms
+    (node.attrs as Record<string, unknown>)['tool_command'] = 'echo hello';
+    const ctx = new Context();
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.context_updates['tool.output']).toContain('hello');
+  });
+
+  it('uses specified timeout from node attrs', async () => {
+    const handler = new ToolHandler();
+    const node = makeNode('tool', { shape: 'parallelogram', timeout: '5s' });
+    (node.attrs as Record<string, unknown>)['tool_command'] = 'echo hello';
+    const ctx = new Context();
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
   });
 
   it('returns FAIL on command error', async () => {
@@ -288,6 +545,205 @@ describe('ParallelHandler', () => {
     expect(outcome.status).toBe(StageStatus.SUCCESS);
     expect(executor).toHaveBeenCalled();
   });
+
+  it('join_policy=first_success returns SUCCESS when at least one branch succeeds', async () => {
+    const executor = vi.fn()
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.FAIL, failure_reason: 'branch1 failed' }))
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.SUCCESS, notes: 'branch2 ok' }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['join_policy'] = 'first_success';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.notes).toContain('At least one branch succeeded');
+  });
+
+  it('join_policy=first_success returns FAIL when all branches fail', async () => {
+    const executor = vi.fn()
+      .mockResolvedValue(makeOutcome({ status: StageStatus.FAIL, failure_reason: 'failed' }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['join_policy'] = 'first_success';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.FAIL);
+    expect(outcome.failure_reason).toContain('All parallel branches failed');
+  });
+
+  it('error_policy=fail_fast stops on first FAIL batch', async () => {
+    let callCount = 0;
+    const executor = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return makeOutcome({ status: StageStatus.FAIL, failure_reason: 'first fails' });
+      }
+      return makeOutcome({ status: StageStatus.SUCCESS });
+    });
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['error_policy'] = 'fail_fast';
+    (node.attrs as Record<string, unknown>)['max_parallel'] = '1'; // one at a time to control order
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2'), makeNode('b3')],
+      [
+        { from: 'par', to: 'b1' },
+        { from: 'par', to: 'b2' },
+        { from: 'par', to: 'b3' },
+      ]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    // Should stop after first batch since it has a FAIL
+    expect(callCount).toBe(1);
+    // wait_all with at least one FAIL returns PARTIAL_SUCCESS (fail_fast only stops execution early)
+    expect(outcome.status).toBe(StageStatus.PARTIAL_SUCCESS);
+  });
+
+  it('max_parallel limits batch size', async () => {
+    const concurrencyTracker: number[] = [];
+    let running = 0;
+    const executor = vi.fn().mockImplementation(async () => {
+      running++;
+      concurrencyTracker.push(running);
+      await new Promise(r => setTimeout(r, 10));
+      running--;
+      return makeOutcome({ status: StageStatus.SUCCESS });
+    });
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['max_parallel'] = '2';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2'), makeNode('b3'), makeNode('b4')],
+      [
+        { from: 'par', to: 'b1' },
+        { from: 'par', to: 'b2' },
+        { from: 'par', to: 'b3' },
+        { from: 'par', to: 'b4' },
+      ]
+    );
+
+    await handler.handle(node, ctx, graph, makeTempDir());
+    // Max concurrent should never exceed 2
+    expect(Math.max(...concurrencyTracker)).toBeLessThanOrEqual(2);
+    expect(executor).toHaveBeenCalledTimes(4);
+  });
+
+  it('executor throwing exception produces FAIL outcome for that branch', async () => {
+    const executor = vi.fn().mockRejectedValue(new Error('branch exploded'));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1')],
+      [{ from: 'par', to: 'b1' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    // wait_all with 1 failed branch -> PARTIAL_SUCCESS
+    expect(outcome.status).toBe(StageStatus.PARTIAL_SUCCESS);
+    const results = JSON.parse(outcome.context_updates['parallel.results'] as string);
+    expect(results[0].outcome).toBe(StageStatus.FAIL);
+  });
+
+  it('null executor simulation returns SUCCESS for all branches with notes', async () => {
+    const handler = new ParallelHandler(null);
+    const node = makeNode('par', { shape: 'component' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    const results = JSON.parse(outcome.context_updates['parallel.results'] as string);
+    expect(results[0].notes).toContain('Simulated');
+    expect(results[1].notes).toContain('Simulated');
+  });
+
+  it('default join policy (not wait_all or first_success) returns SUCCESS if any succeeded', async () => {
+    const executor = vi.fn()
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.SUCCESS }))
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.FAIL, failure_reason: 'oops' }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['join_policy'] = 'any';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.notes).toContain('1 succeeded');
+  });
+
+  it('default join policy returns FAIL if none succeeded', async () => {
+    const executor = vi.fn()
+      .mockResolvedValue(makeOutcome({ status: StageStatus.FAIL, failure_reason: 'nope' }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    (node.attrs as Record<string, unknown>)['join_policy'] = 'any';
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.FAIL);
+  });
+
+  it('branches[i]?.to fallback when more results than branches', async () => {
+    // This can happen if the executor produces extra results somehow
+    // We'll use a custom executor that returns more results than branches
+    const executor = vi.fn()
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.SUCCESS, notes: 'b1 ok' }))
+      .mockResolvedValueOnce(makeOutcome({ status: StageStatus.SUCCESS, notes: 'b2 ok' }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1'), makeNode('b2')],
+      [{ from: 'par', to: 'b1' }, { from: 'par', to: 'b2' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    const results = JSON.parse(outcome.context_updates['parallel.results'] as string);
+    expect(results[0].branch).toBe('b1');
+    expect(results[1].branch).toBe('b2');
+  });
+
+  it('wait_all with PARTIAL_SUCCESS counts as success', async () => {
+    const executor = vi.fn()
+      .mockResolvedValue(makeOutcome({ status: StageStatus.PARTIAL_SUCCESS }));
+    const handler = new ParallelHandler(executor);
+    const node = makeNode('par', { shape: 'component' });
+    const ctx = new Context();
+    const graph = makeGraph(
+      [node, makeNode('b1')],
+      [{ from: 'par', to: 'b1' }]
+    );
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.notes).toContain('All parallel branches succeeded');
+  });
 });
 
 describe('FanInHandler', () => {
@@ -329,6 +785,91 @@ describe('FanInHandler', () => {
     const outcome = await handler.handle(node, ctx, graph, makeTempDir());
     expect(outcome.status).toBe(StageStatus.FAIL);
   });
+
+  it('returns FAIL on malformed JSON in parallel.results', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', 'not valid json {{{');
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.FAIL);
+    expect(outcome.failure_reason).toContain('Failed to parse parallel results');
+  });
+
+  it('returns FAIL on empty results array', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', JSON.stringify([]));
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.FAIL);
+    expect(outcome.failure_reason).toContain('No parallel results');
+  });
+
+  it('selects higher-scored branch among same-status results', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', JSON.stringify([
+      { branch: 'b1', outcome: 'success', score: 5 },
+      { branch: 'b2', outcome: 'success', score: 10 },
+    ]));
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.context_updates['parallel.fan_in.best_id']).toBe('b2');
+  });
+
+  it('selects PARTIAL_SUCCESS over FAIL', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', JSON.stringify([
+      { branch: 'b1', outcome: 'fail' },
+      { branch: 'b2', outcome: 'partial_success' },
+    ]));
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.context_updates['parallel.fan_in.best_id']).toBe('b2');
+  });
+
+  it('lexical tiebreak when score and status are equal', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', JSON.stringify([
+      { branch: 'z_branch', outcome: 'success', score: 5 },
+      { branch: 'a_branch', outcome: 'success', score: 5 },
+    ]));
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    expect(outcome.context_updates['parallel.fan_in.best_id']).toBe('a_branch');
+  });
+
+  it('unknown outcome status falls back to rank 3 (same as FAIL)', async () => {
+    const handler = new FanInHandler();
+    const node = makeNode('fanin', { shape: 'tripleoctagon' });
+    const ctx = new Context();
+    ctx.set('parallel.results', JSON.stringify([
+      { branch: 'b1', outcome: 'unknown_status' },
+      { branch: 'b2', outcome: 'success' },
+    ]));
+    const graph = makeGraph([node]);
+
+    const outcome = await handler.handle(node, ctx, graph, makeTempDir());
+    expect(outcome.status).toBe(StageStatus.SUCCESS);
+    // b2 (success, rank 0) should win over b1 (unknown, rank 3)
+    expect(outcome.context_updates['parallel.fan_in.best_id']).toBe('b2');
+  });
 });
 
 describe('parseAcceleratorKey', () => {
@@ -346,5 +887,9 @@ describe('parseAcceleratorKey', () => {
 
   it('falls back to first character', () => {
     expect(parseAcceleratorKey('Hello')).toBe('H');
+  });
+
+  it('returns empty string for empty label', () => {
+    expect(parseAcceleratorKey('')).toBe('');
   });
 });

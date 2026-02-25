@@ -1,10 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import { parseStylesheet, applyStylesheet, SelectorType } from './stylesheet.js';
-import { parseDot } from './parser/dot-parser.js';
 import type { Graph } from './types.js';
 import { DEFAULT_NODE_ATTRIBUTES, DEFAULT_GRAPH_ATTRIBUTES } from './types.js';
 
 describe('parseStylesheet', () => {
+  it('parses universal selector *', () => {
+    const rules = parseStylesheet('* { model = "gpt-4" }');
+    expect(rules).toHaveLength(1);
+    expect(rules[0].selector.type).toBe(SelectorType.UNIVERSAL);
+    expect(rules[0].selector.value).toBe('*');
+    expect(rules[0].declarations[0].value).toBe('gpt-4');
+  });
+
+  it('handles trailing whitespace after last rule', () => {
+    const rules = parseStylesheet('box { model = "claude" }   \n  ');
+    expect(rules).toHaveLength(1);
+  });
+
+  it('passes through unknown property names unchanged', () => {
+    const rules = parseStylesheet('box { custom_prop = "val" }');
+    expect(rules[0].declarations[0].property).toBe('custom_prop');
+  });
+
   it('parses shape selector', () => {
     const rules = parseStylesheet('box { model = "claude" }');
     expect(rules).toHaveLength(1);
@@ -148,5 +165,141 @@ describe('applyStylesheet', () => {
     };
     const result = applyStylesheet(graph);
     expect(result).toBe(graph);
+  });
+
+  it('universal selector applies to all nodes', () => {
+    const graph = makeGraphWithStylesheet(
+      '* { model = "universal-model" }',
+      [
+        { id: 'A', shape: 'box' },
+        { id: 'B', shape: 'hexagon' },
+      ]
+    );
+    const result = applyStylesheet(graph);
+    expect((result.nodes.get('A')!.attrs as Record<string, unknown>).llm_model).toBe('universal-model');
+    expect((result.nodes.get('B')!.attrs as Record<string, unknown>).llm_model).toBe('universal-model');
+  });
+
+  it('class selector does not match node with no class', () => {
+    const graph = makeGraphWithStylesheet(
+      '.fast { model = "gemini" }',
+      [{ id: 'A', class: '' }]
+    );
+    const result = applyStylesheet(graph);
+    expect(result.nodes.get('A')!.attrs.llm_model).toBe('');
+  });
+});
+
+describe('parseStylesheet - edge cases', () => {
+  it('quoted values with escaped characters', () => {
+    const rules = parseStylesheet('box { model = "claude\\"opus" }');
+    expect(rules).toHaveLength(1);
+    expect(rules[0].declarations[0].value).toBe('claude"opus');
+  });
+
+  it('throws on missing closing brace', () => {
+    expect(() => parseStylesheet('box { model = "test"')).toThrow(/Expected '}'/);
+  });
+
+  it('throws on missing opening brace', () => {
+    expect(() => parseStylesheet('box model = "test" }')).toThrow(/Expected '{'/);
+  });
+
+  it('unquoted property values read until ; or }', () => {
+    const rules = parseStylesheet('box { model = gpt-4o-mini }');
+    expect(rules[0].declarations[0].value).toBe('gpt-4o-mini');
+  });
+
+  it('throws on missing declaration separator', () => {
+    expect(() => parseStylesheet('box { model "test" }')).toThrow(/Expected '=' or ':'/);
+  });
+
+  it('throws on empty class name', () => {
+    expect(() => parseStylesheet('. { model = "test" }')).toThrow(/Expected class name/);
+  });
+
+  it('throws on empty identifier', () => {
+    expect(() => parseStylesheet('{ model = "test" }')).toThrow();
+  });
+
+  it('property name with underscores', () => {
+    const rules = parseStylesheet('box { reasoning_effort = high }');
+    expect(rules[0].declarations[0].property).toBe('reasoning_effort');
+    expect(rules[0].declarations[0].value).toBe('high');
+  });
+
+  it('parses empty stylesheet (whitespace only)', () => {
+    const rules = parseStylesheet('   \n   ');
+    expect(rules).toHaveLength(0);
+  });
+
+  it('parses stylesheet with trailing whitespace after rules', () => {
+    const rules = parseStylesheet('box { model = "test" }   \n  ');
+    expect(rules).toHaveLength(1);
+  });
+
+  it('throws on missing property name', () => {
+    expect(() => parseStylesheet('box { = "test" }')).toThrow(/Expected property name/);
+  });
+});
+
+describe('applyStylesheet - specificity', () => {
+  function makeGraphWithStylesheet(stylesheet: string, nodes: Array<{ id: string; shape?: string; class?: string; llm_model?: string }>): Graph {
+    const graph: Graph = {
+      name: 'test',
+      attrs: { ...DEFAULT_GRAPH_ATTRIBUTES, model_stylesheet: stylesheet },
+      nodes: new Map(),
+      edges: [],
+    };
+    for (const n of nodes) {
+      graph.nodes.set(n.id, {
+        id: n.id,
+        attrs: {
+          ...DEFAULT_NODE_ATTRIBUTES,
+          shape: n.shape ?? 'box',
+          class: n.class ?? '',
+          llm_model: n.llm_model ?? '',
+        },
+      });
+    }
+    return graph;
+  }
+
+  it('later rule of same specificity overrides earlier', () => {
+    const graph = makeGraphWithStylesheet(
+      'box { model = "first" }\nbox { model = "second" }',
+      [{ id: 'A', shape: 'box' }]
+    );
+    const result = applyStylesheet(graph);
+    expect((result.nodes.get('A')!.attrs as Record<string, unknown>).llm_model).toBe('second');
+  });
+
+  it('higher specificity overrides lower regardless of order', () => {
+    const graph = makeGraphWithStylesheet(
+      '#specific { model = "id-model" }\nbox { model = "shape-model" }',
+      [{ id: 'specific', shape: 'box' }]
+    );
+    const result = applyStylesheet(graph);
+    expect((result.nodes.get('specific')!.attrs as Record<string, unknown>).llm_model).toBe('id-model');
+  });
+
+  it('canonical property mapping: model -> llm_model, provider -> llm_provider', () => {
+    const graph = makeGraphWithStylesheet(
+      'box { model = "test-model"; provider = "test-provider" }',
+      [{ id: 'A', shape: 'box' }]
+    );
+    const result = applyStylesheet(graph);
+    expect((result.nodes.get('A')!.attrs as Record<string, unknown>).llm_model).toBe('test-model');
+    expect((result.nodes.get('A')!.attrs as Record<string, unknown>).llm_provider).toBe('test-provider');
+  });
+
+  it('unknown property falls through PROPERTY_MAP to itself', () => {
+    const graph = makeGraphWithStylesheet(
+      'box { some_custom_prop = "custom_val" }',
+      [{ id: 'A', shape: 'box' }]
+    );
+    const result = applyStylesheet(graph);
+    // Property not in PROPERTY_MAP should use the property name as-is
+    expect((result.nodes.get('A')!.attrs as Record<string, unknown>).some_custom_prop).toBe('custom_val');
   });
 });

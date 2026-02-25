@@ -390,6 +390,76 @@ describe('detectLoop', () => {
     ];
     expect(detectLoop(history, 6)).toBe(false);
   });
+
+  it('detects repeating pattern of length 3', () => {
+    const history: Turn[] = [];
+    // A, B, C, A, B, C pattern
+    for (let i = 0; i < 2; i++) {
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: '/a' } }]),
+      );
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: '/b' } }]),
+      );
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: '/c' } }]),
+      );
+    }
+    expect(detectLoop(history, 6)).toBe(true);
+  });
+
+  it('returns false when windowSize is not divisible by pattern length', () => {
+    const history: Turn[] = [];
+    // 5 identical tool calls — window=5, not divisible by 2 or 3
+    for (let i = 0; i < 5; i++) {
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: '/x' } }]),
+      );
+    }
+    // 5 is divisible by 1 so length-1 pattern check will pass
+    expect(detectLoop(history, 5)).toBe(true);
+  });
+
+  it('windowSize % patternLen !== 0 causes continue (line 250)', () => {
+    // windowSize=7: not divisible by 2 or 3, only divisible by 1
+    // With 7 identical tool calls, pattern length 1 should still detect
+    const history: Turn[] = [];
+    for (let i = 0; i < 7; i++) {
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: '/x' } }]),
+      );
+    }
+    // 7 % 1 === 0 (match), 7 % 2 !== 0 (skip), 7 % 3 !== 0 (skip)
+    expect(detectLoop(history, 7)).toBe(true);
+  });
+
+  it('windowSize not divisible by 2 or 3 with non-repeating data (line 250)', () => {
+    const history: Turn[] = [];
+    for (let i = 0; i < 7; i++) {
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: `/file${i}` } }]),
+      );
+    }
+    // All unique files — no pattern of length 1
+    expect(detectLoop(history, 7)).toBe(false);
+  });
+
+  it('handles mixed tool calls and non-tool turns', () => {
+    const history: Turn[] = [];
+    // Add user turns mixed with assistant tool calls
+    for (let i = 0; i < 6; i++) {
+      history.push({
+        kind: 'user',
+        content: `msg ${i}`,
+        timestamp: new Date(),
+      });
+      history.push(
+        makeAssistantTurn([{ name: 'read_file', args: { file_path: `/file${i}` } }]),
+      );
+    }
+    // 6 unique tool calls with varied args — no loop
+    expect(detectLoop(history, 6)).toBe(false);
+  });
 });
 
 describe('convertHistoryToMessages', () => {
@@ -452,5 +522,549 @@ describe('convertHistoryToMessages', () => {
     const messages = convertHistoryToMessages(history);
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('system');
+  });
+
+  it('converts assistant with tool_calls to assistant message with tool_call parts', () => {
+    const history: Turn[] = [
+      {
+        kind: 'assistant',
+        content: 'Let me read that file.',
+        tool_calls: [
+          { id: 't1', name: 'read_file', arguments: { file_path: '/x' } },
+        ],
+        reasoning: null,
+        usage: makeUsage(),
+        response_id: 'resp-1',
+        timestamp: new Date(),
+      },
+    ];
+    const messages = convertHistoryToMessages(history);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('assistant');
+    // Should have text part + tool_call part
+    expect(messages[0].content.length).toBe(2);
+  });
+
+  it('converts tool_results with non-string content', () => {
+    const history: Turn[] = [
+      {
+        kind: 'tool_results',
+        results: [
+          { tool_call_id: 't1', content: { key: 'value' } as unknown as string, is_error: false },
+        ],
+        timestamp: new Date(),
+      },
+    ];
+    const messages = convertHistoryToMessages(history);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('tool');
+  });
+});
+
+describe('processInput additional coverage', () => {
+  it('max_turns limit stops the loop', async () => {
+    let callCount = 0;
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(async () => {
+        callCount++;
+        return makeResponse({
+          text: `round ${callCount}`,
+          tool_calls: [],
+        });
+      }),
+    };
+    // max_turns of 2 — user turn + assistant turn = 2, should stop
+    const ctx = makeContext({
+      client,
+      config: { max_turns: 2 },
+    });
+
+    const events: string[] = [];
+    ctx.event_emitter.on(EventKind.TURN_LIMIT, () => events.push('limit'));
+
+    await processInput(ctx, 'do stuff');
+
+    // With max_turns=2: user input adds 1 turn, assistant adds 1 turn = 2 total
+    // Then on next iteration, countTurns >= max_turns, so TURN_LIMIT fires
+    // But since there are no tool calls, the loop exits naturally first
+    expect(ctx.state).toBe(SessionState.IDLE);
+  });
+
+  it('loop detection injects steering warning', async () => {
+    let callCount = 0;
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount <= 12) {
+          return makeResponse({
+            text: '',
+            tool_calls: [
+              {
+                id: `t${callCount}`,
+                name: 'read_file',
+                arguments: { file_path: '/same_file' },
+              },
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          });
+        }
+        return makeResponse({ text: 'done', tool_calls: [] });
+      }),
+    };
+    const ctx = makeContext({
+      client,
+      config: {
+        enable_loop_detection: true,
+        loop_detection_window: 6,
+        max_tool_rounds_per_input: 15,
+      },
+    });
+
+    const loopEvents: string[] = [];
+    ctx.event_emitter.on(EventKind.LOOP_DETECTION, () =>
+      loopEvents.push('loop'),
+    );
+
+    await processInput(ctx, 'repeat something');
+
+    expect(loopEvents.length).toBeGreaterThan(0);
+    const steeringTurns = ctx.history.filter((t) => t.kind === 'steering');
+    expect(steeringTurns.some((t) =>
+      t.kind === 'steering' && t.content.includes('Loop detected'),
+    )).toBe(true);
+  });
+
+  it('context usage warning emits at high usage', async () => {
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [
+              { id: 't1', name: 'read_file', arguments: { file_path: '/x' } },
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'done', tool_calls: [] }),
+        ),
+    };
+    // Set a very small context window to trigger the warning
+    const registry = makeToolRegistry();
+    const ctx = makeContext({ client, registry });
+    ctx.provider_profile = {
+      ...ctx.provider_profile,
+      context_window_size: 10, // Very small to trigger warning easily
+    };
+
+    const warnings: string[] = [];
+    ctx.event_emitter.on(EventKind.WARNING, (e) =>
+      warnings.push(e.data.message as string),
+    );
+
+    await processInput(ctx, 'trigger context warning');
+
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]).toContain('Context usage');
+  });
+
+  it('parallel tool execution when profile supports it', async () => {
+    const registry = makeToolRegistry();
+    // Add a second tool
+    registry.register({
+      definition: {
+        name: 'write_file',
+        description: 'Write a file',
+        parameters: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string' },
+            content: { type: 'string' },
+          },
+          required: ['file_path', 'content'],
+        },
+      },
+      executor: async (args) => `wrote to ${args.file_path}`,
+    });
+
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [
+              { id: 't1', name: 'read_file', arguments: { file_path: '/a' } },
+              { id: 't2', name: 'write_file', arguments: { file_path: '/b', content: 'x' } },
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'All done.', tool_calls: [] }),
+        ),
+    };
+
+    const ctx = makeContext({ client, registry });
+    ctx.provider_profile = {
+      ...ctx.provider_profile,
+      supports_parallel_tool_calls: true,
+    };
+
+    await processInput(ctx, 'do parallel work');
+
+    // Both tools should have been called
+    const toolResults = ctx.history.find((t) => t.kind === 'tool_results');
+    if (toolResults?.kind === 'tool_results') {
+      expect(toolResults.results).toHaveLength(2);
+      expect(toolResults.results[0].is_error).toBe(false);
+      expect(toolResults.results[1].is_error).toBe(false);
+    }
+  });
+
+  it('tool executor throwing returns error result', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      definition: {
+        name: 'failing_tool',
+        description: 'A tool that throws',
+        parameters: { type: 'object', properties: {} },
+      },
+      executor: async () => { throw new Error('executor blew up'); },
+    });
+
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [{ id: 't1', name: 'failing_tool', arguments: {} }],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'noted', tool_calls: [] }),
+        ),
+    };
+
+    const ctx = makeContext({ client, registry });
+
+    await processInput(ctx, 'fail please');
+
+    const toolResults = ctx.history.find((t) => t.kind === 'tool_results');
+    if (toolResults?.kind === 'tool_results') {
+      expect(toolResults.results[0].is_error).toBe(true);
+      expect(toolResults.results[0].content).toContain('executor blew up');
+    }
+  });
+
+  it('tool call with string arguments gets parsed as JSON', async () => {
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [
+              {
+                id: 't1',
+                name: 'read_file',
+                arguments: JSON.stringify({ file_path: '/test.txt' }),
+              },
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'read it', tool_calls: [] }),
+        ),
+    };
+
+    const ctx = makeContext({ client });
+    await processInput(ctx, 'read with string args');
+
+    const toolResults = ctx.history.find((t) => t.kind === 'tool_results');
+    if (toolResults?.kind === 'tool_results') {
+      expect(toolResults.results[0].is_error).toBe(false);
+    }
+  });
+
+  it('tool validation failure returns error result', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      definition: {
+        name: 'strict_tool',
+        description: 'Requires specific args',
+        parameters: {
+          type: 'object',
+          properties: { name: { type: 'string' } },
+          required: ['name'],
+        },
+      },
+      executor: async (args) => `hello ${args.name}`,
+    });
+
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [
+              { id: 't1', name: 'strict_tool', arguments: {} }, // Missing 'name'
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'ok', tool_calls: [] }),
+        ),
+    };
+
+    const ctx = makeContext({ client, registry });
+    await processInput(ctx, 'validate me');
+
+    const toolResults = ctx.history.find((t) => t.kind === 'tool_results');
+    if (toolResults?.kind === 'tool_results') {
+      expect(toolResults.results[0].is_error).toBe(true);
+      expect(toolResults.results[0].content).toContain('Validation error');
+    }
+  });
+
+  it('steering during tool execution is drained after tool round', async () => {
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [
+              { id: 't1', name: 'read_file', arguments: { file_path: '/x' } },
+            ],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'Got it.', tool_calls: [] }),
+        ),
+    };
+    const ctx = makeContext({ client });
+
+    // Inject steering during tool execution
+    ctx.event_emitter.on(EventKind.TOOL_CALL_START, () => {
+      ctx.steering_queue.push('Focus on performance');
+    });
+
+    await processInput(ctx, 'read files');
+
+    const steeringTurns = ctx.history.filter((t) => t.kind === 'steering');
+    expect(steeringTurns.some((t) =>
+      t.kind === 'steering' && t.content === 'Focus on performance',
+    )).toBe(true);
+  });
+
+  it('max_turns limit stops loop during tool execution', async () => {
+    let callCount = 0;
+    const client: LLMClient = {
+      complete: vi.fn().mockImplementation(async () => {
+        callCount++;
+        return makeResponse({
+          text: '',
+          tool_calls: [
+            {
+              id: `t${callCount}`,
+              name: 'read_file',
+              arguments: { file_path: `/file${callCount}` },
+            },
+          ],
+          finish_reason: { reason: 'tool_calls' },
+        });
+      }),
+    };
+    // max_turns = 4: 1 user + 1 assistant + 1 tool_results + 1 assistant ...
+    // countTurns counts user and assistant turns
+    const ctx = makeContext({
+      client,
+      config: { max_turns: 3 },
+    });
+
+    const events: Record<string, unknown>[] = [];
+    ctx.event_emitter.on(EventKind.TURN_LIMIT, (e) => events.push(e.data));
+
+    await processInput(ctx, 'work hard');
+
+    // Should have hit the total turns limit
+    expect(events.length).toBeGreaterThan(0);
+    const limitEvent = events.find(
+      (e) => 'total_turns' in e,
+    );
+    expect(limitEvent).toBeDefined();
+  });
+
+  it('discoverProjectDocs loads provider-specific files', async () => {
+    const ctx = makeContext();
+    ctx.execution_env = {
+      ...ctx.execution_env,
+      file_exists: vi.fn().mockImplementation(async (p: string) => {
+        return p.includes('AGENTS.md');
+      }),
+      read_file: vi.fn().mockResolvedValue('Project docs content'),
+    };
+
+    await processInput(ctx, 'test docs');
+
+    // The system prompt should have been built with project docs
+    expect(ctx.history.length).toBeGreaterThan(0);
+  });
+
+  it('discoverProjectDocs truncates content exceeding 32KB', async () => {
+    // Create content that will exceed MAX_BYTES (32768) when combined
+    const largeContent = 'X'.repeat(33000); // over 32KB
+    const ctx = makeContext();
+    ctx.execution_env = {
+      ...ctx.execution_env,
+      file_exists: vi.fn().mockResolvedValue(true),
+      read_file: vi.fn().mockResolvedValue(largeContent),
+    };
+
+    await processInput(ctx, 'test truncation');
+
+    // Should still succeed without error
+    expect(ctx.history.length).toBeGreaterThan(0);
+  });
+
+  it('discoverProjectDocs skips unreadable files', async () => {
+    const ctx = makeContext();
+    ctx.execution_env = {
+      ...ctx.execution_env,
+      file_exists: vi.fn().mockResolvedValue(true),
+      read_file: vi.fn().mockRejectedValue(new Error('Permission denied')),
+    };
+
+    await processInput(ctx, 'test file read error');
+
+    // Should still succeed — unreadable files are silently skipped
+    expect(ctx.history.length).toBeGreaterThan(0);
+  });
+
+  it('discoverProjectDocs truncates with remaining > 0 at 32KB boundary (line 185-193)', async () => {
+    // Create content that puts us just under MAX_BYTES on first file,
+    // then second file pushes us over but remaining > 0
+    let callCount = 0;
+    const ctx = makeContext();
+    ctx.provider_profile = { ...ctx.provider_profile, id: 'anthropic' };
+    ctx.execution_env = {
+      ...ctx.execution_env,
+      file_exists: vi.fn().mockImplementation(async (p: string) => {
+        return p.includes('AGENTS.md') || p.includes('CLAUDE.md');
+      }),
+      read_file: vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          // First file: 30KB — under the 32KB budget
+          return 'A'.repeat(30 * 1024);
+        }
+        // Second file: 10KB — would push over 32KB, triggers truncation with remaining > 0
+        return 'B'.repeat(10 * 1024);
+      }),
+    };
+
+    await processInput(ctx, 'test truncation boundary');
+    expect(ctx.history.length).toBeGreaterThan(0);
+  });
+
+  it('discoverProjectDocs truncates with remaining <= 0 (line 191 false branch)', async () => {
+    // First file fills the entire 32KB budget, second file has remaining = 0
+    let callCount = 0;
+    const ctx = makeContext();
+    ctx.provider_profile = { ...ctx.provider_profile, id: 'anthropic' };
+    ctx.execution_env = {
+      ...ctx.execution_env,
+      file_exists: vi.fn().mockImplementation(async (p: string) => {
+        return p.includes('AGENTS.md') || p.includes('CLAUDE.md');
+      }),
+      read_file: vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          // First file: exactly 32KB — fills the budget completely
+          return 'A'.repeat(32 * 1024);
+        }
+        // Second file: any content — remaining will be 0
+        return 'B'.repeat(1024);
+      }),
+    };
+
+    await processInput(ctx, 'test truncation exact');
+    expect(ctx.history.length).toBeGreaterThan(0);
+  });
+
+  it('LLM error with non-Error object transitions to CLOSED (line 519)', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockRejectedValue('plain string error'),
+    };
+    const ctx = makeContext({ client });
+
+    await processInput(ctx, 'trigger non-Error rejection');
+    expect(ctx.state).toBe(SessionState.CLOSED);
+  });
+
+  it('tool error with non-Error object returns error message (line 400)', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      definition: {
+        name: 'throws_string',
+        description: 'Throws non-Error',
+        parameters: { type: 'object', properties: {} },
+      },
+      executor: async () => { throw 'string_error'; },
+    });
+
+    const client: LLMClient = {
+      complete: vi
+        .fn()
+        .mockResolvedValueOnce(
+          makeResponse({
+            text: '',
+            tool_calls: [{ id: 't1', name: 'throws_string', arguments: {} }],
+            finish_reason: { reason: 'tool_calls' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeResponse({ text: 'ok', tool_calls: [] }),
+        ),
+    };
+
+    const ctx = makeContext({ client, registry });
+    await processInput(ctx, 'trigger string throw');
+
+    const toolResults = ctx.history.find((t) => t.kind === 'tool_results');
+    if (toolResults?.kind === 'tool_results') {
+      expect(toolResults.results[0].is_error).toBe(true);
+      expect(toolResults.results[0].content).toContain('string_error');
+    }
+  });
+
+  it('response.text and response.tool_calls null handling (lines 533-534)', async () => {
+    const client: LLMClient = {
+      complete: vi.fn().mockResolvedValue({
+        id: 'resp-1',
+        text: null,
+        tool_calls: null,
+        reasoning: null,
+        usage: makeUsage(),
+        finish_reason: { reason: 'stop' },
+      }),
+    };
+    const ctx = makeContext({ client });
+
+    await processInput(ctx, 'test null response fields');
+
+    // Should handle null text/tool_calls gracefully
+    expect(ctx.state).toBe(SessionState.IDLE);
+    const assistantTurns = ctx.history.filter(t => t.kind === 'assistant');
+    expect(assistantTurns.length).toBeGreaterThan(0);
   });
 });

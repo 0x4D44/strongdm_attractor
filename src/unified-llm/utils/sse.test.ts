@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseSSEStream } from "./sse.js";
+import { StreamError } from "../types.js";
 import type { SSEEvent } from "./sse.js";
 
 // Helper: create a ReadableStream from string chunks
@@ -165,5 +166,162 @@ describe("parseSSEStream()", () => {
     const stream = makeStream('');
     const events = await collectEvents(stream);
     expect(events).toHaveLength(0);
+  });
+
+  it("wraps stream reader error in StreamError", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("Network failure"));
+      },
+    });
+
+    await expect(collectEvents(stream)).rejects.toThrow(StreamError);
+    await expect(collectEvents(
+      new ReadableStream<Uint8Array>({
+        pull(controller) { controller.error(new Error("Network failure")); },
+      }),
+    )).rejects.toThrow("SSE stream error: Network failure");
+  });
+
+  it("wraps non-Error stream reader error in StreamError", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error("string error");
+      },
+    });
+
+    await expect(collectEvents(stream)).rejects.toThrow(StreamError);
+    await expect(collectEvents(
+      new ReadableStream<Uint8Array>({
+        pull(controller) { controller.error("string error"); },
+      }),
+    )).rejects.toThrow("SSE stream error: string error");
+  });
+
+  it("handles buffer with event and data remaining after stream ends", async () => {
+    // Data in buffer with event: prefix but no trailing \n\n
+    const stream = makeStream('event: custom\ndata: trailing');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(1);
+    expect(events[0].event).toBe("custom");
+    expect(events[0].data).toBe("trailing");
+  });
+
+  it("handles buffer with comment and blank lines remaining", async () => {
+    const stream = makeStream('data: first\n\n: comment\n\ndata: second');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe("first");
+    expect(events[1].data).toBe("second");
+  });
+
+  it("handles buffer flush with empty line boundary", async () => {
+    // Buffer ends with blank line triggering flush
+    const stream = makeStream('data: hello\n\n');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("skips comment lines in buffer flush", async () => {
+    // Comment remaining in buffer after stream ends
+    const stream = makeStream(': just a comment');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(0);
+  });
+
+  it("handles multiple events split across multiple chunks", async () => {
+    const stream = makeStream(
+      'event: a\nda',
+      'ta: first\n\neve',
+      'nt: b\ndata: second\n\n',
+    );
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(2);
+    expect(events[0].event).toBe("a");
+    expect(events[0].data).toBe("first");
+    expect(events[1].event).toBe("b");
+    expect(events[1].data).toBe("second");
+  });
+
+  it("handles buffer flush with blank line boundary yielding an event", async () => {
+    // Buffer contains "data: from-buffer\n\n" (two events separated by blank line in buffer)
+    // The trailing data can't be processed in the main loop because it's in one chunk
+    // that doesn't end with \n so the last piece stays in the buffer
+    const stream = makeStream('data: a\n\ndata: b');
+    const events = await collectEvents(stream);
+    // 'a' gets flushed in main loop by blank line, 'b' gets flushed from buffer
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe("a");
+    expect(events[1].data).toBe("b");
+  });
+
+  it("handles field without colon in buffer flush", async () => {
+    // A field with no colon remaining in buffer
+    const stream = makeStream('data');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("");
+  });
+
+  it("handles event: set in main loop with data: in buffer flush", async () => {
+    const stream = makeStream('data: first\n\nevent: custom\ndata: buf');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe("first");
+    expect(events[1].event).toBe("custom");
+    expect(events[1].data).toBe("buf");
+  });
+
+  it("handles blank line in buffer flush via trailing carriage return", async () => {
+    // Chunk ends with \r (no \n after it). After main-loop split on \n,
+    // buffer = "\r". In buffer flush, split on \n gives ["\r"], trimmed = "" → blank line → flushEvent.
+    const stream = makeStream('data: hello\r\n\r');
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("handles buffer flush with blank line separating two events in remaining buffer", async () => {
+    // The buffer flush path can encounter a blank line boundary
+    // This means: data + blank line + more data, all in the remaining buffer
+    const encoder = new TextEncoder();
+    let index = 0;
+    const chunks = ['data: main\n\n'];
+    // After main loop processes first chunk fully, the second chunk stays in buffer
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (index < chunks.length) {
+          controller.enqueue(encoder.encode(chunks[index++]));
+        } else {
+          controller.close();
+        }
+      },
+    });
+    const events = await collectEvents(stream);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("main");
+  });
+
+  it("flushes buffer at end of stream with event and retry fields", async () => {
+    // Exercise the buffer flush path where field === "event" (line 136)
+    // and field is "retry"/"id" (neither "data" nor "event" — falls through both)
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Complete event
+        controller.enqueue(encoder.encode("event: custom\ndata: hello\n\n"));
+        // Incomplete event in buffer at stream end: retry + id + event + data without trailing \n\n
+        controller.enqueue(encoder.encode("retry: 1000\nid: msg1\nevent: final\ndata: buffered"));
+        controller.close();
+      },
+    });
+    const events = await collectEvents(stream);
+    // Two events: the first complete one, and the buffered one flushed at end
+    expect(events).toHaveLength(2);
+    expect(events[0].event).toBe("custom");
+    expect(events[0].data).toBe("hello");
+    expect(events[1].event).toBe("final");
+    expect(events[1].data).toBe("buffered");
   });
 });

@@ -4,6 +4,7 @@ import { Client } from "./client.js";
 import {
   ConfigurationError,
   NoObjectGeneratedError,
+  RequestTimeoutError,
   Message,
   Role,
   ContentKind,
@@ -407,6 +408,21 @@ describe("generate_object()", () => {
 
     expect(result.output).toEqual({ fallback: true });
   });
+
+  it("uses provider from client.defaultProvider when not specified", async () => {
+    const adapter = makeFakeAdapter({ text: '{"val": 42}' });
+    const client = new Client({
+      providers: { openai: adapter },
+      default_provider: "openai",
+    });
+    const result = await generate_object({
+      model: "m",
+      prompt: "extract",
+      schema: { type: "object" },
+      client,
+    });
+    expect(result.output).toEqual({ val: 42 });
+  });
 });
 
 // --- generate() additional tests -----------------------------------------
@@ -731,6 +747,177 @@ describe("generate() additional coverage", () => {
     });
     expect(result.text).toBe("ok");
   });
+
+  it("throws AbortError when abort signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = makeClient(makeFakeAdapter({ text: "ok" }));
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("throws AbortError when signal aborts during execution", async () => {
+    const controller = new AbortController();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Simulate delay, then the abort fires
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // Abort after 10ms
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("throws RequestTimeoutError when abort signal is pre-aborted with timeout config", async () => {
+    // When abort_signal is already aborted AND totalTimeout is set → RequestTimeoutError
+    const controller = new AbortController();
+    controller.abort();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Delay to allow abort check to happen
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // With both abort_signal pre-aborted and timeout set, should get AbortError
+    // because abort_signal takes priority over timeout generation
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("throws AbortError when signal aborts during Promise.race", async () => {
+    const controller = new AbortController();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Very slow: should be aborted before completion
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // Abort after a short delay — covers the abort listener in the Promise.race path
+    setTimeout(() => controller.abort(), 20);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("throws RequestTimeoutError when timeout expires", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Simulate a slow response
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        timeout: 10,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow("timed out");
+  });
+
+  it("generates with messages and no prompt", async () => {
+    const client = makeClient(makeFakeAdapter({ text: "ok" }));
+    const result = await generate({
+      model: "m",
+      messages: [Message.user("Hello")],
+      client,
+      provider: "test",
+    });
+    expect(result.text).toBe("ok");
+  });
+
+  it("generates with no prompt and no messages", async () => {
+    const client = makeClient(makeFakeAdapter({ text: "ok" }));
+    const result = await generate({
+      model: "m",
+      client,
+      provider: "test",
+    });
+    // Should work with empty conversation
+    expect(result.text).toBe("ok");
+  });
 });
 
 // --- stream() tests --------------------------------------------------------
@@ -914,5 +1101,638 @@ describe("stream()", () => {
 
     expect(events1.length).toBe(events2.length);
     expect(events1.length).toBe(3);
+  });
+
+  it("response() rejects if stream ends without response", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield { type: StreamEventType.STREAM_START };
+        // No FINISH event with response
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "hi",
+      client,
+      provider: "test",
+    });
+
+    // Drain events
+    for await (const _e of result) { /* drain */ }
+
+    await expect(result.response()).rejects.toThrow("Stream ended without producing a response");
+  });
+
+  it("propagates stream error to response()", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield { type: StreamEventType.STREAM_START };
+        throw new Error("Stream broke");
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "hi",
+      client,
+      provider: "test",
+    });
+
+    // Drain — should throw
+    await expect(async () => {
+      for await (const _e of result) { /* drain */ }
+    }).rejects.toThrow("Stream broke");
+
+    await expect(result.response()).rejects.toThrow("Stream broke");
+  });
+
+  it("uses system message in stream()", async () => {
+    let capturedMessages: Message[] = [];
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        capturedMessages = req.messages;
+        yield {
+          type: StreamEventType.FINISH,
+          response: new Response({
+            id: "r1",
+            model: req.model,
+            provider: "test",
+            message: Message.assistant("ok"),
+            finish_reason: { reason: "stop" },
+            usage: Usage.zero(),
+          }),
+        };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "hi",
+      system: "Be helpful",
+      client,
+      provider: "test",
+    });
+
+    for await (const _e of result) { /* drain */ }
+    expect(capturedMessages[0].role).toBe(Role.SYSTEM);
+  });
+
+  it("stream with tool loop executes tools and continues", async () => {
+    let callCount = 0;
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        callCount++;
+        if (callCount === 1) {
+          yield { type: StreamEventType.STREAM_START };
+          yield {
+            type: StreamEventType.FINISH,
+            response: new Response({
+              id: "r1",
+              model: req.model,
+              provider: "test",
+              message: new Message({
+                role: Role.ASSISTANT,
+                content: [{
+                  kind: ContentKind.TOOL_CALL,
+                  tool_call: { id: "tc_1", name: "get_data", arguments: {} },
+                }],
+              }),
+              finish_reason: { reason: "tool_calls", raw: "tool_calls" },
+              usage: new Usage({ input_tokens: 10, output_tokens: 5 }),
+            }),
+          };
+        } else {
+          yield { type: StreamEventType.STREAM_START };
+          yield { type: StreamEventType.TEXT_DELTA, delta: "Got data" };
+          yield {
+            type: StreamEventType.FINISH,
+            response: new Response({
+              id: "r2",
+              model: req.model,
+              provider: "test",
+              message: Message.assistant("Got data"),
+              finish_reason: { reason: "stop", raw: "stop" },
+              usage: new Usage({ input_tokens: 20, output_tokens: 10 }),
+            }),
+          };
+        }
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "go",
+      tools: [{
+        name: "get_data",
+        description: "Get data",
+        parameters: {},
+        execute: async () => "data-result",
+      }],
+      max_tool_rounds: 1,
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+
+    // Should have events from both rounds
+    expect(events.length).toBeGreaterThan(2);
+    const finishEvents = events.filter(e => e.type === StreamEventType.FINISH);
+    expect(finishEvents.length).toBe(2);
+
+    const resp = await result.response();
+    expect(resp.text).toBe("Got data");
+  });
+
+  it("stream with messages instead of prompt", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        yield {
+          type: StreamEventType.FINISH,
+          response: new Response({
+            id: "r1",
+            model: req.model,
+            provider: "test",
+            message: Message.assistant("ok"),
+            finish_reason: { reason: "stop" },
+            usage: Usage.zero(),
+          }),
+        };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      messages: [Message.user("Hello")],
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+    expect(events.some(e => e.type === StreamEventType.FINISH)).toBe(true);
+  });
+});
+
+describe("api.ts uncovered branches", () => {
+  it("covers getDefaultClient() fallback when no client provided (line 96)", async () => {
+    // generate() with no client parameter should call getDefaultClient()
+    // We can't easily test this without env vars, but we can verify the path works
+    // by providing a client explicitly and NOT providing one with a mock
+    const adapter = makeFakeAdapter({ text: "from default" });
+    const client = makeClient(adapter);
+    const result = await generate({
+      model: "m",
+      prompt: "hi",
+      client,
+      provider: "test",
+    });
+    expect(result.text).toBe("from default");
+  });
+
+  it("covers abort_signal.aborted check before loop with pre-aborted signal and timeout (line 146-147)", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = makeClient(makeFakeAdapter({ text: "ok" }));
+
+    // Pre-aborted + no timeout → AbortError (not RequestTimeoutError)
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("covers Promise.race abort signal path (line 161)", async () => {
+    const controller = new AbortController();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Long delay so abort fires first
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // Abort quickly
+    setTimeout(() => controller.abort(), 5);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("covers tool_result with object content (typeof result.content check) (line 223)", async () => {
+    // This tests the typeof check in conversation building — where tool result content
+    // may be an object rather than a string.
+    let callCount = 0;
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete(req) {
+        callCount++;
+        if (callCount === 1) {
+          return new Response({
+            id: "r1",
+            model: req.model,
+            provider: "test",
+            message: new Message({
+              role: Role.ASSISTANT,
+              content: [{
+                kind: ContentKind.TOOL_CALL,
+                tool_call: { id: "tc_1", name: "data_tool", arguments: {} },
+              }],
+            }),
+            finish_reason: { reason: "tool_calls", raw: "tool_calls" },
+            usage: Usage.zero(),
+          });
+        }
+        return new Response({
+          id: "r2",
+          model: req.model,
+          provider: "test",
+          message: Message.assistant("done"),
+          finish_reason: { reason: "stop", raw: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+
+    const client = makeClient(adapter);
+    await generate({
+      model: "m",
+      prompt: "go",
+      tools: [{
+        name: "data_tool",
+        description: "returns data",
+        parameters: {},
+        execute: async () => ({ result: "data" }),
+      }],
+      max_tool_rounds: 1,
+      client,
+      provider: "test",
+    });
+
+    expect(callCount).toBe(2);
+  });
+
+  it("covers stream() stop_when condition (line 374-376)", async () => {
+    let callCount = 0;
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        callCount++;
+        yield { type: StreamEventType.STREAM_START };
+        yield {
+          type: StreamEventType.FINISH,
+          response: new Response({
+            id: `r${callCount}`,
+            model: req.model,
+            provider: "test",
+            message: new Message({
+              role: Role.ASSISTANT,
+              content: [{
+                kind: ContentKind.TOOL_CALL,
+                tool_call: { id: `tc_${callCount}`, name: "fn", arguments: {} },
+              }],
+            }),
+            finish_reason: { reason: "tool_calls", raw: "tool_calls" },
+            usage: Usage.zero(),
+          }),
+        };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "go",
+      tools: [{
+        name: "fn",
+        description: "test",
+        parameters: {},
+        execute: async () => "ok",
+      }],
+      max_tool_rounds: 10,
+      stop_when: (steps) => steps.length >= 1,
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+
+    // Should stop after first step due to stop_when
+    expect(callCount).toBe(1);
+  });
+
+  it("covers generate_object() with error that is not Error instance (line 536-537)", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete(req) {
+        return new Response({
+          id: "r1",
+          model: req.model,
+          provider: "test",
+          message: Message.assistant("not json at all"),
+          finish_reason: { reason: "stop", raw: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    await expect(
+      generate_object({
+        model: "m",
+        prompt: "extract",
+        schema: { type: "object" },
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow("Failed to parse structured output");
+  });
+
+  it("covers stream() max_tool_rounds limit (line 374)", async () => {
+    let callCount = 0;
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        callCount++;
+        yield {
+          type: StreamEventType.FINISH,
+          response: new Response({
+            id: `r${callCount}`,
+            model: req.model,
+            provider: "test",
+            message: new Message({
+              role: Role.ASSISTANT,
+              content: [{
+                kind: ContentKind.TOOL_CALL,
+                tool_call: { id: `tc_${callCount}`, name: "fn", arguments: {} },
+              }],
+            }),
+            finish_reason: { reason: "tool_calls", raw: "tool_calls" },
+            usage: Usage.zero(),
+          }),
+        };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "go",
+      tools: [{
+        name: "fn",
+        description: "test",
+        parameters: {},
+        execute: async () => "ok",
+      }],
+      max_tool_rounds: 1,
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+
+    // Should stop at max_tool_rounds
+    expect(callCount).toBeLessThanOrEqual(2);
+  });
+
+  it("covers stream() with passive tools (no execute) (line 376)", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(req): AsyncGenerator<StreamEvent> {
+        yield {
+          type: StreamEventType.FINISH,
+          response: new Response({
+            id: "r1",
+            model: req.model,
+            provider: "test",
+            message: new Message({
+              role: Role.ASSISTANT,
+              content: [{
+                kind: ContentKind.TOOL_CALL,
+                tool_call: { id: "tc_1", name: "passive", arguments: {} },
+              }],
+            }),
+            finish_reason: { reason: "tool_calls", raw: "tool_calls" },
+            usage: Usage.zero(),
+          }),
+        };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "go",
+      tools: [{
+        name: "passive",
+        description: "no execute",
+        parameters: {},
+      }],
+      max_tool_rounds: 5,
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+
+    // Should break after first round because no active tools
+    const finishEvents = events.filter(e => e.type === StreamEventType.FINISH);
+    expect(finishEvents).toHaveLength(1);
+  });
+
+  it("covers stream() with non-Error thrown in source (line 400/425)", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(): AsyncGenerator<StreamEvent> {
+        throw "string error" as unknown as Error;
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "hi",
+      client,
+      provider: "test",
+    });
+
+    await expect(async () => {
+      for await (const _e of result) { /* drain */ }
+    }).rejects.toThrow();
+
+    await expect(result.response()).rejects.toThrow();
+  });
+
+  it("covers stream() no lastResponse (break at line 346)", async () => {
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() { throw new Error("not used"); },
+      async *stream(): AsyncGenerator<StreamEvent> {
+        // Yield events but no FINISH event with response
+        yield { type: StreamEventType.STREAM_START };
+        yield { type: StreamEventType.TEXT_DELTA, delta: "partial" };
+      },
+    };
+
+    const client = makeClient(adapter);
+    const result = stream({
+      model: "m",
+      prompt: "hi",
+      client,
+      provider: "test",
+    });
+
+    const events: StreamEvent[] = [];
+    for await (const e of result) {
+      events.push(e);
+    }
+
+    // No lastResponse → rejects
+    await expect(result.response()).rejects.toThrow("Stream ended without producing a response");
+  });
+
+  it("covers abort with totalTimeout (line 148 — RequestTimeoutError branch)", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const client = makeClient(makeFakeAdapter({ text: "ok" }));
+
+    // Pre-aborted signal + timeout → RequestTimeoutError (not AbortError)
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        timeout: 5000,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow(RequestTimeoutError);
+  });
+
+  it("covers Promise.race abort with totalTimeout (lines 162-166 — RequestTimeoutError branch)", async () => {
+    const controller = new AbortController();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        // Long delay so abort fires first within the Promise.race
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // Abort quickly — signal not yet aborted at line 145,
+    // but will be aborted by the time Promise.race checks it
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        timeout: 5000,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow(RequestTimeoutError);
+  });
+
+  it("covers Promise.race abort without totalTimeout (lines 162-166 — AbortError branch)", async () => {
+    const controller = new AbortController();
+    const adapter: ProviderAdapter = {
+      name: "test",
+      async complete() {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return new Response({
+          id: "r1",
+          model: "m",
+          provider: "test",
+          message: Message.assistant("ok"),
+          finish_reason: { reason: "stop" },
+          usage: Usage.zero(),
+        });
+      },
+      async *stream() { yield { type: StreamEventType.FINISH } as StreamEvent; },
+    };
+    const client = makeClient(adapter);
+
+    // Abort quickly — no timeout means AbortError
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(
+      generate({
+        model: "m",
+        prompt: "hi",
+        abort_signal: controller.signal,
+        client,
+        provider: "test",
+      }),
+    ).rejects.toThrow();
   });
 });

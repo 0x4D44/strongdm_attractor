@@ -726,3 +726,22 @@ describe("errorFromStatusCode()", () => {
     expect(err.retryable).toBe(true);
   });
 });
+
+describe("Usage.add — optional field branches", () => {
+  it("returns undefined when both optional fields are undefined", () => {
+    const a = Usage.zero();
+    const b = Usage.zero();
+    const result = a.add(b);
+    // Both reasoning_tokens are undefined → addOptional returns undefined
+    expect(result.reasoning_tokens).toBeUndefined();
+    expect(result.cache_read_tokens).toBeUndefined();
+    expect(result.cache_write_tokens).toBeUndefined();
+  });
+
+  it("returns sum when one side has a value and other is undefined", () => {
+    const a = new Usage({ input_tokens: 0, output_tokens: 0, total_tokens: 0, reasoning_tokens: 5 });
+    const b = Usage.zero();
+    const result = a.add(b);
+    expect(result.reasoning_tokens).toBe(5);
+  });
+});

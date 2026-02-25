@@ -217,5 +217,45 @@ describe('EventEmitter', () => {
       const next = await iter.next();
       expect(next.done).toBe(true);
     });
+
+    it('SESSION_END resolves pending next() with done=true', async () => {
+      const em = new EventEmitter('sess-1');
+      // Use a kinds filter so wildcard push doesn't happen for SESSION_END
+      const iter = em.asyncIterator([EventKind.USER_INPUT]);
+
+      // Start waiting for next (no events in queue yet, not done)
+      const pendingPromise = iter.next();
+
+      // Emit SESSION_END while the iterator is waiting
+      // The endListener should resolve the pending promise with done=true
+      em.emit(EventKind.SESSION_END);
+
+      const result = await pendingPromise;
+      expect(result.done).toBe(true);
+    });
+
+    it('[Symbol.asyncIterator] returns itself', () => {
+      const em = new EventEmitter('sess-1');
+      const iter = em.asyncIterator();
+      expect(iter[Symbol.asyncIterator]()).toBe(iter);
+    });
+
+    it('can be used with for-await-of', async () => {
+      const em = new EventEmitter('sess-1');
+      const iter = em.asyncIterator();
+      const events: string[] = [];
+
+      em.emit(EventKind.USER_INPUT, { content: 'a' });
+      em.emit(EventKind.LLM_CALL_START, { model: 'x' });
+      em.emit(EventKind.SESSION_END);
+
+      for await (const event of iter) {
+        events.push(event.kind);
+        if (event.kind === EventKind.SESSION_END) break;
+      }
+
+      expect(events).toContain(EventKind.USER_INPUT);
+      expect(events).toContain(EventKind.SESSION_END);
+    });
   });
 });

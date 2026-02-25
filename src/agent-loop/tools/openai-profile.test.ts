@@ -226,4 +226,89 @@ describe('applyPatchTool', () => {
     const result = await applyPatchTool.executor({ patch }, env);
     expect(result).toContain('Updated src/file.ts');
   });
+
+  it('parsePatch with only Begin and End markers produces no ops (line 65)', async () => {
+    const env = makeEnv();
+    const patch = `Some preamble text
+*** Begin Patch
+*** End Patch
+Some trailing text`;
+
+    const result = await applyPatchTool.executor({ patch }, env);
+    expect(result).toBe('No operations performed.');
+  });
+
+  it('applyHunksToContent with empty hunks applies no changes (line 246)', async () => {
+    const env = makeEnv({
+      read_file: vi.fn().mockResolvedValue('original content\n'),
+    });
+
+    const patch = `*** Begin Patch
+*** Update File: src/file.ts
+*** End Patch`;
+
+    const result = await applyPatchTool.executor({ patch }, env);
+    expect(result).toContain('Updated src/file.ts');
+    // write_file should be called with original content (no hunks applied)
+    expect(env.write_file).toHaveBeenCalledWith('src/file.ts', 'original content\n');
+  });
+
+  it('applyHunksToContent scanning falls back to full file scan (line 162)', async () => {
+    // Context hint points to wrong area, so exact match near hint fails
+    // Falls back to scanning entire file
+    const env = makeEnv({
+      read_file: vi.fn().mockResolvedValue('line1\nline2\ntarget_line\nline4\n'),
+    });
+
+    const patch = `*** Begin Patch
+*** Update File: src/file.ts
+@@ wrong_hint_here
+ target_line
+-line4
++line4_modified
+*** End Patch`;
+
+    const result = await applyPatchTool.executor({ patch }, env);
+    expect(result).toContain('Updated src/file.ts');
+    expect(env.write_file).toHaveBeenCalledWith('src/file.ts', expect.stringContaining('line4_modified'));
+  });
+
+  it('applyHunksToContent fuzzy whitespace match (line 172-179)', async () => {
+    // File has extra whitespace that doesn't match exactly
+    // but matches after normalization
+    const env = makeEnv({
+      read_file: vi.fn().mockResolvedValue('  line1  \n   target   line  \n  line3  \n'),
+    });
+
+    const patch = `*** Begin Patch
+*** Update File: src/file.ts
+@@ target
+ target line
+-line3
++line3_replaced
+*** End Patch`;
+
+    const result = await applyPatchTool.executor({ patch }, env);
+    expect(result).toContain('Updated src/file.ts');
+  });
+
+  it('parsePatch with lines lacking recognized prefix in hunk — skip (line 110-112)', async () => {
+    const env = makeEnv({
+      read_file: vi.fn().mockResolvedValue('line1\nline2\nline3\n'),
+    });
+
+    // The "No newline at end of file" marker is a common line
+    // without the expected prefix — it should be skipped (the i++ at line 112)
+    const patch = `*** Begin Patch
+*** Update File: src/file.ts
+@@ line2
+ line2
+-line3
++line3_modified
+\\ No newline at end of file
+*** End Patch`;
+
+    const result = await applyPatchTool.executor({ patch }, env);
+    expect(result).toContain('Updated src/file.ts');
+  });
 });
